@@ -1,0 +1,667 @@
+"""LangGraph StateGraph for claim processing with DashScope/Qwen structured output."""
+
+import json
+from collections.abc import Awaitable, Callable
+from typing import Literal
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+
+from claimflow.agents.states import ClaimAgentState, ClaimStatus
+from claimflow.core.config import get_settings
+from claimflow.core.logging import get_logger
+from claimflow.models.agent_schemas import RiskAssessmentResult, ToolDecision, TriageResult
+from claimflow.services.llm_service import LLMInvocationError, ainvoke_llm_with_fallback
+from claimflow.services.vision_service import VisionService, VisionServiceError
+from claimflow.tools.weather_tool import get_weather_history
+
+logger = get_logger(__name__)
+
+# Below this consistency score a text-image mismatch is considered severe fraud signal.
+SEVERE_INCONSISTENCY_THRESHOLD: float = 0.3
+# Fraud score applied when text and image report incompatible damage types.
+SEVERE_INCONSISTENCY_FRAUD_SCORE: float = 0.85
+
+TRIAGE_SYSTEM_PROMPT = """\
+Você é um assistente especializado em sinistros de seguros residenciais no Brasil.
+Sua tarefa é extrair informações estruturadas do texto bruto de um aviso de sinistro.
+
+Regras:
+- Extraia apenas informações explicitamente presentes ou claramente inferíveis do texto.
+- Se um campo não puder ser determinado, use valores razoáveis e indique incerteza na descrição.
+- Classifique o tipo de dano (AGUA, FOGO, VENTO, OUTRO) com base no relato.
+- A descrição resumida deve ter no máximo 3 frases em português brasileiro.
+- Para data_incidente, retorne null se a data não for mencionada.
+"""
+
+INVESTIGATION_SYSTEM_PROMPT = """\
+Você é um investigador de sinistros de seguros residenciais no Brasil.
+Analise o relato do cliente e decida se é necessária verificação climática externa.
+
+Regras:
+- Analise o relato do cliente. Se ele mencionar eventos climáticos (chuva, vento, \
+tempestade, granizo, vendaval) e fornecer uma localização e data, você DEVE decidir \
+chamar a ferramenta 'get_weather_history'.
+- Nesse caso, defina requires_tool_call=True, tool_name='get_weather_history' e preencha \
+tool_arguments com {"location": "...", "date": "..."} extraídos do texto.
+- Caso contrário, retorne requires_tool_call=False, tool_name='none' e tool_arguments={}.
+- Explique sua decisão em reasoning.
+- Use formatos razoáveis para local e data (ex.: "São Paulo, SP", "2026-03-15" ou "ontem").
+"""
+
+RISK_SYSTEM_PROMPT = """\
+Você é um analista sênior de fraudes em sinistros de seguros, com postura cética \
+e baseada em evidências.
+Avalie o sinistro estruturado abaixo e atribua scores de risco de fraude e severidade.
+
+Diretrizes:
+- Seja cético: procure inconsistências, exageros, omissões e padrões típicos de fraude.
+- Considere a análise visual (se fornecida) e o score de consistência texto-imagem.
+- Considere a verificação climática (se fornecida) ao avaliar coerência do relato.
+- fraud_risk_score: probabilidade de intenção fraudulenta (0.0 = sem indícios, 1.0 = altíssima).
+- severity_score: impacto financeiro/operacional estimado (0.0 = trivial, 1.0 = catastrófico).
+- justificativa_risco: explique os fatores que influenciaram os scores (em português).
+- requires_human_review: true se houver qualquer dúvida material que exija um perito humano.
+- Não aprove sinistros automaticamente; sua função é apenas avaliar risco.
+"""
+
+
+FAIL_CLOSED_REASON = "Insufficient data extracted from claim"
+MISSING_IMAGE_ANALYSIS_PENALTY = 0.3
+MISSING_WEATHER_VERIFICATION_PENALTY = 0.2
+MIN_FRAUD_ON_DATA_GAP = 0.01
+
+_WEATHER_KEYWORDS: tuple[str, ...] = (
+    "chuva",
+    "vento",
+    "tempestade",
+    "granizo",
+    "vendaval",
+    "rajada",
+    "inundação",
+    "inundacao",
+    "alagamento",
+    "storm",
+    "rain",
+    "hurricane",
+    "tornado",
+    "climát",
+    "climatic",
+    "weather",
+    "enchente",
+    "nevasca",
+    "geada",
+)
+
+
+def _mentions_weather_climate(text: str) -> bool:
+    """Return True when the claim text references weather or climate events."""
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in _WEATHER_KEYWORDS)
+
+
+def _compute_fail_closed_penalties(state: ClaimAgentState) -> tuple[float, list[str]]:
+    """Apply additive fraud penalties when expected evidence is missing."""
+    penalties: list[str] = []
+    bonus = 0.0
+
+    if state.get("image_path") and not state.get("image_analysis"):
+        bonus += MISSING_IMAGE_ANALYSIS_PENALTY
+        penalties.append("Image provided but visual analysis unavailable (+0.3)")
+
+    raw_input = state.get("raw_input", "")
+    if _mentions_weather_climate(raw_input) and not state.get("weather_verification"):
+        bonus += MISSING_WEATHER_VERIFICATION_PENALTY
+        penalties.append("Weather mentioned but verification unavailable (+0.2)")
+
+    return bonus, penalties
+
+
+def _has_data_integrity_gaps(state: ClaimAgentState, fail_closed_penalties: list[str]) -> bool:
+    """Detect states that must never auto-approve with a zero fraud score."""
+    extracted_data = state.get("extracted_data") or {}
+    return bool(
+        state.get("system_error")
+        or state.get("error")
+        or not extracted_data
+        or fail_closed_penalties
+    )
+
+
+def _system_error_state(state: ClaimAgentState, node: str, message: str) -> ClaimAgentState:
+    """Build a partial state update for irrecoverable LLM/vision failures."""
+    claim_id = state["claim_id"]
+    logger.error(
+        "FAIL-CLOSED: Escalating to human review due to missing data",
+        extra={"claim_id": claim_id, "node": node, "error_message": message},
+    )
+    return {
+        **state,
+        "status": ClaimStatus.HUMAN_REVIEW,
+        "system_error": True,
+        "requires_human_review": True,
+        "fraud_risk_score": max(state.get("fraud_risk_score", 0.0), 1.0),
+        "severity_score": max(state.get("severity_score", 0.0), 1.0),
+        "risk_score": 1.0,
+        "error": message,
+        "error_message": message,
+    }
+
+
+def _wrap_safe_node(
+    node_name: str,
+    node_fn: Callable[[ClaimAgentState], Awaitable[ClaimAgentState]],
+) -> Callable[[ClaimAgentState], Awaitable[ClaimAgentState]]:
+    """Catch unhandled exceptions so the API never crashes on graph execution."""
+
+    async def safe_node(state: ClaimAgentState) -> ClaimAgentState:
+        try:
+            return await node_fn(state)
+        except Exception as exc:
+            logger.critical(
+                "Unhandled exception in graph node",
+                extra={
+                    "claim_id": state.get("claim_id"),
+                    "node": node_name,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return _system_error_state(state, node_name, f"{node_name} failed: {exc}")
+
+    safe_node.__name__ = node_fn.__name__
+    return safe_node
+
+
+def _composite_risk_score(fraud: float, severity: float) -> float:
+    """Return the composite risk score used for routing and API responses."""
+    return max(fraud, severity)
+
+
+def _resolve_status(
+    fraud_score: float,
+    severity_score: float,
+    requires_human_review: bool,
+) -> ClaimStatus:
+    """Map LLM scores to a final claim status using configured thresholds."""
+    settings = get_settings()
+    composite = _composite_risk_score(fraud_score, severity_score)
+
+    if composite >= settings.reject_threshold:
+        return ClaimStatus.REJECTED
+    if requires_human_review or composite >= settings.risk_threshold:
+        return ClaimStatus.HUMAN_REVIEW
+    return ClaimStatus.APPROVED
+
+
+async def _run_vision_cross_validation(
+    state: ClaimAgentState,
+    triage_result: TriageResult,
+) -> dict:
+    """Analyse the claim image and compute text-vs-image consistency."""
+    claim_id = state["claim_id"]
+    image_path = state.get("image_path")
+    updates: dict = {
+        "image_analysis": None,
+        "consistency_score": None,
+        "fraud_risk_score": state.get("fraud_risk_score", 0.0),
+    }
+
+    if not image_path:
+        return updates
+
+    vision = VisionService()
+
+    try:
+        image_analysis = await vision.analyze_claim_image(image_path, state["raw_input"])
+    except VisionServiceError as exc:
+        logger.error(
+            "Vision analysis failed; escalating fraud signal",
+            extra={"claim_id": claim_id, "node": "triage", "error": str(exc)},
+        )
+        updates["error"] = f"Vision analysis failed: {exc}"
+        updates["error_message"] = updates["error"]
+        updates["fraud_risk_score"] = max(state.get("fraud_risk_score", 0.0), 0.7)
+        return updates
+
+    text_damage = triage_result.tipo_dano.value
+    image_damage = str(image_analysis.get("detected_damage_type", "OUTRO"))
+    consistency = VisionService.compute_consistency_score(text_damage, image_damage)
+
+    logger.info(
+        "Text-image cross-validation completed",
+        extra={
+            "claim_id": claim_id,
+            "node": "triage",
+            "text_damage_type": text_damage,
+            "image_damage_type": image_damage,
+            "consistency_score": consistency,
+            "consistency_pct": round(consistency * 100, 1),
+        },
+    )
+
+    updates["image_analysis"] = image_analysis
+    updates["consistency_score"] = consistency
+
+    inconsistencies = image_analysis.get("inconsistencies") or []
+    if consistency < SEVERE_INCONSISTENCY_THRESHOLD or inconsistencies:
+        logger.warning(
+            "Severe text-image inconsistency detected",
+            extra={
+                "claim_id": claim_id,
+                "node": "triage",
+                "text_says": text_damage,
+                "image_shows": image_damage,
+                "consistency_pct": round(consistency * 100, 1),
+                "inconsistencies": inconsistencies,
+            },
+        )
+        updates["fraud_risk_score"] = SEVERE_INCONSISTENCY_FRAUD_SCORE
+
+    return updates
+
+
+async def triage_node(state: ClaimAgentState) -> ClaimAgentState:
+    """Extract structured claim fields and optionally cross-validate with Qwen-VL."""
+    claim_id = state["claim_id"]
+    log = logger
+    log.info("Triage node started", extra={"claim_id": claim_id, "node": "triage"})
+
+    messages = [
+        SystemMessage(content=TRIAGE_SYSTEM_PROMPT),
+        HumanMessage(content=state["raw_input"]),
+    ]
+
+    try:
+        triage_result, _model = await ainvoke_llm_with_fallback(
+            messages,
+            temperature=0.1,
+            configure=lambda llm: llm.with_structured_output(TriageResult),
+        )
+    except LLMInvocationError as exc:
+        return _system_error_state(state, "triage", f"Triage failed: {exc}")
+    except Exception as exc:
+        log.error(
+            "Triage structured output failed",
+            extra={"claim_id": claim_id, "node": "triage", "error": str(exc)},
+        )
+        return _system_error_state(state, "triage", f"Triage failed: {exc}")
+
+    extracted = triage_result.model_dump(mode="json")
+    vision_updates = await _run_vision_cross_validation(state, triage_result)
+
+    if vision_updates.get("system_error"):
+        return {
+            **state,
+            "extracted_data": extracted,
+            "image_analysis": vision_updates.get("image_analysis"),
+            "consistency_score": vision_updates.get("consistency_score"),
+            "fraud_risk_score": vision_updates.get("fraud_risk_score", 0.0),
+            "status": ClaimStatus.HUMAN_REVIEW,
+            "system_error": True,
+            "requires_human_review": True,
+            "error": vision_updates.get("error", ""),
+            "error_message": vision_updates.get("error_message", ""),
+        }
+
+    log.info(
+        "Triage completed",
+        extra={
+            "claim_id": claim_id,
+            "node": "triage",
+            "tipo_dano": triage_result.tipo_dano,
+            "cliente_nome": triage_result.cliente_nome,
+            "has_image": bool(state.get("image_path")),
+            "consistency_score": vision_updates.get("consistency_score"),
+        },
+    )
+
+    return {
+        **state,
+        "extracted_data": extracted,
+        "image_analysis": vision_updates.get("image_analysis"),
+        "consistency_score": vision_updates.get("consistency_score"),
+        "fraud_risk_score": vision_updates.get("fraud_risk_score", 0.0),
+        "status": ClaimStatus.PENDING,
+        "error": vision_updates.get("error", state.get("error", "")),
+    }
+
+
+async def _invoke_weather_tool(tool_arguments: dict) -> dict:
+    """Call get_weather_history with validated arguments from ToolDecision."""
+    location = str(tool_arguments.get("location", "")).strip()
+    date = str(tool_arguments.get("date", "")).strip()
+    if not location or not date:
+        raise ValueError("tool_arguments must include non-empty 'location' and 'date'")
+    return await get_weather_history(location, date)
+
+
+async def investigation_node(state: ClaimAgentState) -> ClaimAgentState:
+    """Investigate external evidence via structured ToolDecision + direct Python calls.
+
+    The LLM returns a :class:`ToolDecision` (JSON mode). When ``requires_tool_call`` is
+    True, this node invokes :func:`get_weather_history` directly — no LangChain bind_tools.
+    """
+    claim_id = state["claim_id"]
+    log = logger
+    log.info("Investigation node started", extra={"claim_id": claim_id, "node": "investigation"})
+
+    if state.get("system_error"):
+        return state
+
+    messages = [
+        SystemMessage(content=INVESTIGATION_SYSTEM_PROMPT),
+        HumanMessage(content=state["raw_input"]),
+    ]
+
+    tool_calls_made: list[str] = list(state.get("tool_calls_made") or [])
+    weather_verification = state.get("weather_verification")
+
+    try:
+        tool_decision, model = await ainvoke_llm_with_fallback(
+            messages,
+            temperature=0.1,
+            configure=lambda llm: llm.with_structured_output(ToolDecision),
+        )
+    except LLMInvocationError as exc:
+        return _system_error_state(state, "investigation", f"Investigation failed: {exc}")
+    except Exception as exc:
+        return _system_error_state(state, "investigation", f"Investigation failed: {exc}")
+
+    log.info(
+        "Tool decision received",
+        extra={
+            "claim_id": claim_id,
+            "node": "investigation",
+            "requires_tool_call": tool_decision.requires_tool_call,
+            "tool_name": tool_decision.tool_name,
+            "reasoning": tool_decision.reasoning,
+            "model": model,
+        },
+    )
+
+    if tool_decision.requires_tool_call and tool_decision.tool_name == "get_weather_history":
+        try:
+            weather_verification = await _invoke_weather_tool(tool_decision.tool_arguments)
+            tool_calls_made.append("get_weather_history")
+        except Exception as exc:
+            log.error(
+                "Weather tool execution failed",
+                extra={"claim_id": claim_id, "node": "investigation", "error": str(exc)},
+            )
+            return _system_error_state(
+                state,
+                "investigation",
+                f"Weather tool execution failed: {exc}",
+            )
+
+    log.info(
+        "Investigation completed",
+        extra={
+            "claim_id": claim_id,
+            "node": "investigation",
+            "tool_calls_made": tool_calls_made,
+            "has_weather_verification": weather_verification is not None,
+            "model": model,
+        },
+    )
+
+    return {
+        **state,
+        "weather_verification": weather_verification,
+        "tool_calls_made": tool_calls_made,
+    }
+
+
+async def risk_assessment_node(state: ClaimAgentState) -> ClaimAgentState:
+    """Assess fraud risk and severity from triage + vision data using a sceptical LLM."""
+    claim_id = state["claim_id"]
+    log = logger
+    log.info(
+        "Risk assessment node started",
+        extra={"claim_id": claim_id, "node": "risk_assessment"},
+    )
+
+    if state.get("system_error"):
+        return {
+            **state,
+            "status": ClaimStatus.HUMAN_REVIEW,
+            "requires_human_review": True,
+            "fraud_risk_score": max(state.get("fraud_risk_score", 0.0), 1.0),
+            "severity_score": max(state.get("severity_score", 0.0), 1.0),
+            "risk_score": 1.0,
+        }
+
+    pre_triage_fraud = state.get("fraud_risk_score", 0.0)
+    extracted_data = state.get("extracted_data") or {}
+    fail_closed_bonus, fail_closed_penalties = _compute_fail_closed_penalties(state)
+
+    if not extracted_data:
+        logger.warning(
+            "FAIL-CLOSED: Escalating to human review due to missing data",
+            extra={
+                "claim_id": claim_id,
+                "node": "risk_assessment",
+                "reason": FAIL_CLOSED_REASON,
+            },
+        )
+        return {
+            **state,
+            "fraud_risk_score": max(pre_triage_fraud, 1.0),
+            "severity_score": 1.0,
+            "risk_score": 1.0,
+            "requires_human_review": True,
+            "risk_assessment": {
+                "fraud_risk_score": 1.0,
+                "severity_score": 1.0,
+                "justificativa_risco": FAIL_CLOSED_REASON,
+                "requires_human_review": True,
+                "fail_closed_reason": FAIL_CLOSED_REASON,
+                "fail_closed_penalties": fail_closed_penalties,
+            },
+            "status": ClaimStatus.HUMAN_REVIEW,
+            "error": FAIL_CLOSED_REASON,
+            "error_message": FAIL_CLOSED_REASON,
+        }
+
+    context_parts = [
+        f"Dados do sinistro (claim_id={claim_id}):\n",
+        json.dumps(extracted_data, ensure_ascii=False, indent=2),
+    ]
+    if state.get("image_analysis"):
+        context_parts.append(
+            "\nAnálise visual (Qwen-VL):\n"
+            + json.dumps(state["image_analysis"], ensure_ascii=False, indent=2)
+        )
+    if state.get("consistency_score") is not None:
+        score = state["consistency_score"]
+        context_parts.append(f"\nScore de consistência texto-imagem: {score:.2f}")
+    if state.get("weather_verification"):
+        context_parts.append(
+            "\nVerificação climática:\n"
+            + json.dumps(state["weather_verification"], ensure_ascii=False, indent=2)
+        )
+    if pre_triage_fraud > 0:
+        context_parts.append(
+            f"\nFraud score pré-triage (inconsistência visual): {pre_triage_fraud:.2f}"
+        )
+
+    triage_payload = "".join(context_parts)
+    messages = [
+        SystemMessage(content=RISK_SYSTEM_PROMPT),
+        HumanMessage(content=triage_payload),
+    ]
+
+    try:
+        risk_result, _model = await ainvoke_llm_with_fallback(
+            messages,
+            temperature=0.3,
+            configure=lambda llm: llm.with_structured_output(RiskAssessmentResult),
+        )
+    except LLMInvocationError as exc:
+        return _system_error_state(state, "risk_assessment", f"Risk assessment failed: {exc}")
+    except Exception as exc:
+        return _system_error_state(state, "risk_assessment", f"Risk assessment failed: {exc}")
+
+    merged_fraud = min(max(pre_triage_fraud, risk_result.fraud_risk_score) + fail_closed_bonus, 1.0)
+    if _has_data_integrity_gaps(state, fail_closed_penalties):
+        merged_fraud = max(merged_fraud, MIN_FRAUD_ON_DATA_GAP)
+        if fail_closed_penalties:
+            logger.warning(
+                "FAIL-CLOSED: Escalating to human review due to missing data",
+                extra={
+                    "claim_id": claim_id,
+                    "node": "risk_assessment",
+                    "penalties": fail_closed_penalties,
+                    "fraud_risk_score": merged_fraud,
+                },
+            )
+
+    requires_review = (
+        risk_result.requires_human_review
+        or bool(fail_closed_penalties)
+        or (
+            state.get("consistency_score") is not None
+            and state["consistency_score"] < SEVERE_INCONSISTENCY_THRESHOLD
+        )
+    )
+
+    risk_payload = risk_result.model_dump(mode="json")
+    if fail_closed_penalties:
+        risk_payload["fail_closed_penalties"] = fail_closed_penalties
+        existing = risk_payload.get("justificativa_risco", "")
+        penalty_note = "; ".join(fail_closed_penalties)
+        risk_payload["justificativa_risco"] = (
+            f"{existing} | FAIL-CLOSED penalties: {penalty_note}"
+            if existing
+            else f"FAIL-CLOSED penalties: {penalty_note}"
+        )
+
+    final_status = _resolve_status(merged_fraud, risk_result.severity_score, requires_review)
+    composite = _composite_risk_score(merged_fraud, risk_result.severity_score)
+
+    log.info(
+        "Risk assessment completed",
+        extra={
+            "claim_id": claim_id,
+            "node": "risk_assessment",
+            "fraud_risk_score": merged_fraud,
+            "severity_score": risk_result.severity_score,
+            "composite_score": composite,
+            "final_status": final_status,
+            "pre_triage_fraud": pre_triage_fraud,
+        },
+    )
+
+    return {
+        **state,
+        "fraud_risk_score": merged_fraud,
+        "severity_score": risk_result.severity_score,
+        "risk_score": composite,
+        "requires_human_review": requires_review,
+        "risk_assessment": risk_payload,
+        "status": final_status,
+    }
+
+
+async def human_review_node(state: ClaimAgentState) -> ClaimAgentState:
+    """Confirm human-review routing and log for the operations queue."""
+    claim_id = state["claim_id"]
+    logger.info(
+        "Claim queued for human review",
+        extra={
+            "claim_id": claim_id,
+            "node": "human_review",
+            "status": ClaimStatus.HUMAN_REVIEW,
+            "system_error": state.get("system_error", False),
+        },
+    )
+    return {**state, "status": ClaimStatus.HUMAN_REVIEW}
+
+
+async def approval_node(state: ClaimAgentState) -> ClaimAgentState:
+    """Confirm automated approval for low-risk claims."""
+    claim_id = state["claim_id"]
+    logger.info(
+        "Claim auto-approved",
+        extra={"claim_id": claim_id, "node": "approval", "status": ClaimStatus.APPROVED},
+    )
+    return {**state, "status": ClaimStatus.APPROVED}
+
+
+async def rejected_node(state: ClaimAgentState) -> ClaimAgentState:
+    """Confirm rejection for high-risk or likely-fraudulent claims."""
+    claim_id = state["claim_id"]
+    logger.info(
+        "Claim rejected",
+        extra={"claim_id": claim_id, "node": "rejected", "status": ClaimStatus.REJECTED},
+    )
+    return {**state, "status": ClaimStatus.REJECTED}
+
+
+def route_after_investigation(
+    state: ClaimAgentState,
+) -> Literal["risk_assessment", "human_review"]:
+    """Skip risk assessment when a prior node flagged a system error."""
+    if state.get("system_error"):
+        return "human_review"
+    return "risk_assessment"
+
+
+def route_after_risk_assessment(
+    state: ClaimAgentState,
+) -> Literal["human_review", "approval", "rejected"]:
+    """Route claims based on the status resolved during risk assessment."""
+    status = state.get("status", ClaimStatus.HUMAN_REVIEW)
+
+    if status == ClaimStatus.REJECTED:
+        return "rejected"
+    if status == ClaimStatus.HUMAN_REVIEW:
+        return "human_review"
+    return "approval"
+
+
+def build_claim_graph(
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
+    """Construct and compile the claim processing StateGraph.
+
+    Pipeline:
+      START → triage → investigation → risk_assessment
+            → [human_review | approval | rejected] → END
+    """
+    graph = StateGraph(ClaimAgentState)
+
+    graph.add_node("triage", _wrap_safe_node("triage", triage_node))
+    graph.add_node("investigation", _wrap_safe_node("investigation", investigation_node))
+    graph.add_node("risk_assessment", _wrap_safe_node("risk_assessment", risk_assessment_node))
+    graph.add_node("human_review", _wrap_safe_node("human_review", human_review_node))
+    graph.add_node("approval", _wrap_safe_node("approval", approval_node))
+    graph.add_node("rejected", _wrap_safe_node("rejected", rejected_node))
+
+    graph.add_edge(START, "triage")
+    graph.add_edge("triage", "investigation")
+    graph.add_conditional_edges(
+        "investigation",
+        route_after_investigation,
+        {
+            "risk_assessment": "risk_assessment",
+            "human_review": "human_review",
+        },
+    )
+    graph.add_conditional_edges(
+        "risk_assessment",
+        route_after_risk_assessment,
+        {
+            "human_review": "human_review",
+            "approval": "approval",
+            "rejected": "rejected",
+        },
+    )
+    graph.add_edge("human_review", END)
+    graph.add_edge("approval", END)
+    graph.add_edge("rejected", END)
+
+    return graph.compile(checkpointer=checkpointer)

@@ -1,0 +1,58 @@
+"""Async SQLAlchemy engine and session factory."""
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from claimflow.core.config import Settings
+from claimflow.core.logging import get_logger
+from claimflow.db.models import Base
+
+logger = get_logger(__name__)
+
+
+class Database:
+    """Manage the async SQLAlchemy engine lifecycle."""
+
+    def __init__(self) -> None:
+        self._engine: AsyncEngine | None = None
+        self._session_factory: async_sessionmaker[AsyncSession] | None = None
+
+    @property
+    def is_configured(self) -> bool:
+        return self._engine is not None
+
+    async def startup(self, settings: Settings) -> None:
+        """Create engine and tables when a database URL is provided."""
+        url = settings.sqlalchemy_database_url
+        if not url:
+            logger.info("No DATABASE_URL configured; using in-memory claim store")
+            return
+
+        self._engine = create_async_engine(url, echo=False)
+        self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
+
+        async with self._engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        logger.info("PostgreSQL claim store initialised", extra={"backend": "postgres"})
+
+    async def shutdown(self) -> None:
+        if self._engine is not None:
+            await self._engine.dispose()
+            self._engine = None
+            self._session_factory = None
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        if self._session_factory is None:
+            msg = "Database is not configured"
+            raise RuntimeError(msg)
+        async with self._session_factory() as session:
+            yield session
