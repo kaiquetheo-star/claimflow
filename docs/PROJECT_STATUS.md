@@ -73,7 +73,7 @@ The Streamlit dashboard (`streamlit_app.py`, ~850 lines) delivers:
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|------------|------------|
 | No demo video published | Judges cannot evaluate product | High if not started | Record today using Demo Mode examples |
-| Proprietary license / no LICENSE file | Fails open-source hackathon requirement | Certain | Add MIT `LICENSE`, update `pyproject.toml` |
+| ~~Proprietary license / no LICENSE file~~ | Resolved | MIT `LICENSE` added; `pyproject.toml` updated |
 | Repo not public or broken setup | Judges cannot reproduce | Medium | Test fresh clone + `make install && make run` |
 | DashScope models not purchased | Live demo uses MockLLM (high-fraud output) | Medium | Verify API key; capture console proof |
 

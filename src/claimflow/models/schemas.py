@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from claimflow.agents.states import ClaimStatus
 
@@ -150,12 +150,34 @@ class ReviewDetailResponse(BaseModel):
 class ReviewDecisionRequest(BaseModel):
     """Adjuster decision on a queued claim."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     decision: Literal["APPROVED", "REJECTED"]
     reviewer_note: str | None = Field(
         default=None,
         max_length=4000,
+        validation_alias=AliasChoices("reviewer_note", "analyst_notes"),
         description="Optional note explaining the adjuster's decision.",
     )
+    analyst_id: str | None = Field(
+        default="demo-analyst",
+        max_length=128,
+        description="Identifier of the human analyst recording the decision.",
+    )
+
+    @field_validator("decision", mode="before")
+    @classmethod
+    def normalize_decision(cls, value: object) -> str:
+        if not isinstance(value, str):
+            msg = "decision must be a string"
+            raise TypeError(msg)
+        normalized = value.strip().upper()
+        if normalized in {"APPROVED", "APPROVE"}:
+            return "APPROVED"
+        if normalized in {"REJECTED", "REJECT"}:
+            return "REJECTED"
+        msg = "decision must be 'approved' or 'rejected'"
+        raise ValueError(msg)
 
 
 class ReviewDecisionResponse(BaseModel):
@@ -164,3 +186,5 @@ class ReviewDecisionResponse(BaseModel):
     claim_id: str
     status: ClaimStatus
     reviewer_note: str | None = None
+    analyst_id: str | None = None
+    decided_at: datetime | None = None

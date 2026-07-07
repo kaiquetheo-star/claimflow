@@ -11,8 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from claimflow import __version__
 from claimflow.agents.graph import build_claim_graph
-from claimflow.api.routers import health_router
-from claimflow.api.routes import claims_router, review_router, uploads_router
+from claimflow.api.routes import claims_router, health_router, review_router, uploads_router
 from claimflow.core.checkpoint import CheckpointManager
 from claimflow.core.config import Settings, get_settings
 from claimflow.core.logging import get_logger, setup_logging

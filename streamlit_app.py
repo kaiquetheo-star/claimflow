@@ -14,6 +14,8 @@ import streamlit as st
 API_BASE_URL = "http://localhost:8000/api/v1"
 SUBMIT_URL = f"{API_BASE_URL}/claims/submit"
 HEALTH_URL = f"{API_BASE_URL}/health"
+DECISION_URL_TEMPLATE = f"{API_BASE_URL}/review/{{claim_id}}/decision"
+ANALYST_ID = "demo-analyst"
 ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png"}
 FRAUD_HIGH_RISK_THRESHOLD = 0.7
 
@@ -81,6 +83,9 @@ def _init_session_state() -> None:
         "analyst_notes": "",
         "pending_confirmation": None,
         "audit_trail": [],
+        "decision_history": [],
+        "decision_receipt": None,
+        "decision_error": None,
         "input_claim_id": "CLM-001",
         "input_raw_text": "",
     }
@@ -297,6 +302,22 @@ def _render_sidebar() -> None:
             if st.session_state.demo_hint:
                 st.info(st.session_state.demo_hint)
 
+        st.divider()
+        st.markdown("### 📋 Decision History")
+        history = st.session_state.decision_history
+        if history:
+            for entry in history[:5]:
+                icon = "✅" if entry["decision"] == "APPROVED" else "❌"
+                notes_preview = entry.get("notes", "")
+                if len(notes_preview) > 60:
+                    notes_preview = f"{notes_preview[:57]}..."
+                st.caption(
+                    f"{icon} **{entry['claim_id']}** · {entry['timestamp']}\n\n"
+                    f"{notes_preview or '(no notes)'}"
+                )
+        else:
+            st.caption("No analyst decisions recorded yet.")
+
 
 def _validate_image(uploaded_file: Any) -> str | None:
     if uploaded_file is None:
@@ -349,6 +370,64 @@ def fetch_claim_detail(claim_id: str) -> dict[str, Any] | None:
     except requests.RequestException:
         pass
     return None
+
+
+def submit_review_decision_api(
+    claim_id: str,
+    decision: str,
+    analyst_notes: str,
+) -> tuple[bool, dict[str, Any] | str]:
+    """POST human decision to the review API. Returns (success, response_or_error)."""
+    url = DECISION_URL_TEMPLATE.format(claim_id=claim_id)
+    payload = {
+        "decision": decision.lower(),
+        "analyst_notes": analyst_notes,
+        "analyst_id": ANALYST_ID,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+    except requests.ConnectionError:
+        return False, "⚠️ Backend not reachable. Please run 'make run' first."
+    except requests.Timeout:
+        return False, "Request timed out while recording the decision. Please try again."
+    except requests.RequestException as exc:
+        return False, f"Network error: {exc}"
+
+    if response.status_code == 404:
+        return False, "Claim not found. Submit the claim before recording a decision."
+    if response.status_code >= 400:
+        detail = response.json().get("detail", response.text) if response.content else response.text
+        if response.status_code == 409 and "already recorded" in str(detail).lower():
+            return False, "Decision already recorded for this claim."
+        return False, str(detail)
+
+    return True, response.json()
+
+
+def _human_review_status_label(result: dict[str, Any], human_decision: str | None) -> str:
+    if human_decision:
+        return human_decision
+    agent_status = str(result.get("status", "PENDING")).upper()
+    if agent_status == "HUMAN_REVIEW":
+        return "PENDING REVIEW"
+    return agent_status
+
+
+def _render_decision_receipt(receipt: dict[str, Any]) -> None:
+    st.markdown("#### 🧾 Decision Receipt")
+    st.markdown(
+        f"""
+        <div class="cf-card" style="border-left: 4px solid #FF6A00;">
+            <strong>Claim:</strong> {receipt.get("claim_id", "—")}<br/>
+            <strong>Decision:</strong> {receipt.get("decision", "—")}<br/>
+            <strong>Analyst:</strong> {receipt.get("analyst_id", ANALYST_ID)}<br/>
+            <strong>Recorded at:</strong> {receipt.get("timestamp", "—")}<br/>
+            <strong>Notes:</strong> {receipt.get("notes") or "(no notes)"}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _full_payload(result: dict[str, Any], detail: dict[str, Any] | None) -> dict[str, Any]:
@@ -618,25 +697,69 @@ def _render_technical_details(result: dict[str, Any], detail: dict[str, Any] | N
             st.json(detail)
 
 
-def _record_decision(claim_id: str, decision: str, notes: str) -> None:
-    entry = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+def _record_decision(claim_id: str, decision: str, notes: str) -> bool:
+    with st.spinner("Recording analyst decision..."):
+        success, result = submit_review_decision_api(claim_id, decision, notes)
+
+    if not success:
+        st.session_state.decision_error = str(result)
+        st.error(str(result))
+        return False
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    api_decided_at = result.get("decided_at")
+    if api_decided_at:
+        timestamp = str(api_decided_at).replace("T", " ")[:19]
+
+    receipt = {
+        "timestamp": timestamp,
         "claim_id": claim_id,
-        "decision": decision,
-        "notes": notes or "(no notes)",
-        "analyst": "Human Analyst",
+        "decision": result.get("status", decision),
+        "notes": notes or result.get("reviewer_note") or "(no notes)",
+        "analyst_id": result.get("analyst_id", ANALYST_ID),
+        "api_response": result,
     }
+    entry = {
+        "timestamp": timestamp,
+        "claim_id": claim_id,
+        "decision": receipt["decision"],
+        "notes": receipt["notes"],
+        "analyst": receipt["analyst_id"],
+    }
+
+    st.session_state.decision_receipt = receipt
+    st.session_state.decision_history.insert(0, entry)
     st.session_state.audit_trail.insert(0, entry)
-    st.session_state.human_decision = decision
+    st.session_state.human_decision = receipt["decision"]
     st.session_state.pending_confirmation = None
-    logger.info("Human analyst decision recorded", extra=entry)
-    print(f"[Claimflow] Human decision: {claim_id} -> {decision} | Notes: {notes}")
+    st.session_state.decision_error = None
+
+    if st.session_state.claim_result:
+        st.session_state.claim_result["status"] = receipt["decision"]
+    if st.session_state.claim_detail:
+        st.session_state.claim_detail["status"] = receipt["decision"]
+
+    logger.info("Human analyst decision recorded via API", extra=entry)
+    st.toast("Decision recorded successfully", icon="✅")
+    return True
+
+
+def _reset_demo_decision_state() -> None:
+    st.session_state.human_decision = None
+    st.session_state.decision_receipt = None
+    st.session_state.decision_error = None
+    st.session_state.pending_confirmation = None
+    st.session_state.analyst_notes = ""
+    st.session_state.analyst_override = False
+    st.toast("Decision state cleared for demo", icon="🔄")
 
 
 def _render_human_actions(result: dict[str, Any]) -> None:
     fraud_score = float(result.get("fraud_risk_score", 0.0))
     is_low_risk = fraud_score <= FRAUD_HIGH_RISK_THRESHOLD
     claim_id = result.get("claim_id", st.session_state.claim_id)
+    decision_made = bool(st.session_state.human_decision or st.session_state.decision_receipt)
+    status_label = _human_review_status_label(result, st.session_state.human_decision)
 
     st.markdown(
         '<div class="cf-card"><div class="cf-card-title">🛡️ Human-in-the-Loop Decision</div>',
@@ -645,6 +768,26 @@ def _render_human_actions(result: dict[str, Any]) -> None:
     st.caption(
         "Regulatory checkpoint: a licensed analyst must confirm or override the AI recommendation."
     )
+
+    status_color = {
+        "APPROVED": "green",
+        "REJECTED": "red",
+        "PENDING REVIEW": "orange",
+    }.get(status_label, "blue")
+    st.markdown(f"**Current status:** :{status_color}[{status_label}]")
+
+    if st.session_state.decision_error and not decision_made:
+        st.error(st.session_state.decision_error)
+
+    if decision_made:
+        st.info("✅ Decision already recorded. Buttons are disabled for this claim.")
+        if st.session_state.decision_receipt:
+            _render_decision_receipt(st.session_state.decision_receipt)
+        if st.button("🔄 Reset for Demo", use_container_width=True, key="reset_demo_decision"):
+            _reset_demo_decision_state()
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
 
     st.session_state.analyst_notes = st.text_area(
         "Analyst notes",
@@ -686,21 +829,22 @@ def _render_human_actions(result: dict[str, Any]) -> None:
         st.warning(f"⚠️ Confirm you want to mark claim **{claim_id}** as **{pending}**?")
         confirm_cols = st.columns(2)
         with confirm_cols[0]:
-            if st.button("Yes, confirm decision", type="primary", use_container_width=True):
-                _record_decision(claim_id, pending, st.session_state.analyst_notes)
+            if st.button(
+                "Yes, confirm decision",
+                type="primary",
+                use_container_width=True,
+            ) and _record_decision(claim_id, pending, st.session_state.analyst_notes):
                 st.success(
                     f"Decision recorded. Claim {claim_id} marked as {pending} by human analyst."
                 )
+                st.rerun()
         with confirm_cols[1]:
             if st.button("Cancel", use_container_width=True):
                 st.session_state.pending_confirmation = None
                 st.rerun()
 
-    if st.session_state.human_decision and not pending:
-        st.info(f"Latest analyst action: **{st.session_state.human_decision}**")
-
     if st.session_state.audit_trail:
-        st.markdown("**Decision Audit Trail**")
+        st.markdown("**Decision Audit Trail (this session)**")
         for entry in st.session_state.audit_trail[:5]:
             st.markdown(
                 f'<div class="audit-entry">'
@@ -759,6 +903,8 @@ def _handle_submit(
     st.session_state.analyst_override = False
     st.session_state.analyst_notes = ""
     st.session_state.pending_confirmation = None
+    st.session_state.decision_receipt = None
+    st.session_state.decision_error = None
     st.rerun()
 
 

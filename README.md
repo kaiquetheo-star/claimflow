@@ -1,5 +1,7 @@
 # Claimflow Autopilot
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 B2B Autopilot Agent for autonomous insurance claims processing, powered by **LangGraph**, **FastAPI**, and **Alibaba Cloud DashScope (Qwen)**.
 
 Claimflow ingests raw claim submissions (e.g. email text), extracts structured data via LLM, assesses risk, and routes each claim through an automated approval pipeline or escalates it to human review.
@@ -22,16 +24,24 @@ Claimflow ingests raw claim submissions (e.g. email text), extracts structured d
                     └────────────────┘
 ```
 
-> **Note:** Detailed architecture documentation (sequence diagrams, deployment topology, data flows) will be added as the system evolves.
+📐 **Full architecture documentation:** [docs/architecture.md](docs/architecture.md) — includes the Mermaid diagram (4 layers: Frontend, Backend, LangGraph, External Services), data-flow walkthrough, and security design.
+
+![Claimflow Architecture](docs/architecture.png)
+
+> **Editable diagram source:** The Mermaid diagram in [docs/architecture.md](docs/architecture.md) can be copied to [mermaid.live](https://mermaid.live) to export an updated PNG/SVG.
 
 ### Agent Pipeline
 
 | Node              | Responsibility                                      |
 |-------------------|-----------------------------------------------------|
 | `triage`          | Parse raw input and extract structured claim fields |
+| `investigation`   | Weather verification via Open-Meteo when needed     |
 | `risk_assessment` | Compute a normalized risk score [0.0 – 1.0]         |
 | `human_review`    | Escalate high-risk claims to an adjuster            |
 | `approval`        | Auto-approve low-risk claims                        |
+| `rejected`        | Auto-reject high-fraud claims                         |
+
+See [docs/architecture.md](docs/architecture.md) for the complete 6-node pipeline.
 
 ---
 
@@ -41,9 +51,13 @@ Claimflow ingests raw claim submissions (e.g. email text), extracts structured d
 - `make`
 - Alibaba Cloud account with DashScope and OSS access
 
+📦 **Deployment guide:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
 ---
 
 ## Setup
+
+See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full deployment guide. Quick start:
 
 ### 1. Clone and configure environment
 
@@ -132,6 +146,12 @@ claimflow/
 │       ├── agents/           # LangGraph state & graph
 │       ├── core/             # Config, logging
 │       └── models/           # Pydantic schemas
+├── docs/
+│   ├── architecture.md       # System architecture + Mermaid diagram
+│   ├── architecture.png      # Architecture diagram image
+│   ├── DEPLOYMENT.md         # Setup and deployment guide
+│   ├── ALIBABA_CLOUD_PROOF.md
+│   └── screenshot.png        # Dashboard preview
 ├── tests/
 ├── .env.example
 ├── Makefile
@@ -141,6 +161,33 @@ claimflow/
 
 ---
 
+## Alibaba Cloud Integration
+
+Claimflow is built on **Alibaba Cloud** for AI inference, object storage, and secure API access:
+
+| Service | Purpose | Models / SDK |
+|---------|---------|--------------|
+| **Qwen Cloud (DashScope)** | Text extraction, risk assessment, vision analysis | `qwen-max`, `qwen-vl-max` |
+| **Alibaba Cloud OSS** | Production storage for claim images and documents | `alibabacloud-oss-v2` |
+| **Alibaba Cloud RAM** | Least-privilege AccessKeys for API authentication | RAM user `claimflow-dev` |
+
+Full proof documentation: **[docs/ALIBABA_CLOUD_PROOF.md](docs/ALIBABA_CLOUD_PROOF.md)**
+
+Central integration module: [`src/claimflow/services/alibaba_cloud_integration.py`](src/claimflow/services/alibaba_cloud_integration.py)
+
+### Verify the integration
+
+Start the API and call the health endpoint:
+
+```bash
+make run
+curl http://localhost:8000/api/v1/health | jq
+```
+
+The response includes `alibaba_cloud_services` with live status for DashScope (Qwen Cloud), OSS, and RAM credentials. See [docs/ALIBABA_CLOUD_PROOF.md](docs/ALIBABA_CLOUD_PROOF.md) for the expected JSON schema and console verification steps.
+
+---
+
 ## License
 
-Proprietary — All rights reserved.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

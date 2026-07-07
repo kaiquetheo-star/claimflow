@@ -1,4 +1,4 @@
-.PHONY: install lint test run run-frontend clean help
+.PHONY: install lint test coverage run run-frontend clean help
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
@@ -26,6 +26,9 @@ lint-fix: ## Auto-fix lint issues with ruff
 
 test: ## Run pytest test suite
 	$(PYTEST) -v
+
+coverage: ## Run tests with coverage report (terminal + htmlcov/)
+	$(PYTEST) --cov=claimflow --cov-report=term-missing --cov-report=html -v
 
 run: ## Start the FastAPI development server
 	$(UVICORN) claimflow.api.main:app --reload --host 0.0.0.0 --port 8000 --app-dir src

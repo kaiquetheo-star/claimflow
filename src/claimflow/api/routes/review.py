@@ -1,5 +1,7 @@
 """Human-review dashboard API for adjuster workflows."""
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from claimflow.agents.states import ClaimStatus
@@ -16,6 +18,14 @@ from claimflow.services.claim_store import ClaimStore
 
 router = APIRouter(prefix="/review", tags=["human-review"])
 logger = get_logger(__name__)
+
+_DECIDABLE_STATUSES: frozenset[ClaimStatus] = frozenset(
+    {
+        ClaimStatus.HUMAN_REVIEW,
+        ClaimStatus.APPROVED,
+        ClaimStatus.REJECTED,
+    }
+)
 
 
 def _queue_item_from_snapshot(snapshot) -> ReviewQueueItem:
@@ -91,28 +101,42 @@ async def submit_review_decision(
     body: ReviewDecisionRequest,
     claim_store: ClaimStore = Depends(get_claim_store),
 ) -> ReviewDecisionResponse:
-    """Apply a human decision to a claim previously routed to review."""
+    """Apply a human decision to a processed claim."""
     snapshot = await claim_store.get(claim_id)
     if snapshot is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found.")
 
-    if snapshot.status != ClaimStatus.HUMAN_REVIEW:
+    if snapshot.status not in _DECIDABLE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Claim is not in HUMAN_REVIEW status (current: {snapshot.status}).",
+            detail=f"Claim cannot be decided in status {snapshot.status}.",
+        )
+
+    if snapshot.payload.get("human_decision"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Decision already recorded for this claim.",
         )
 
     new_status = ClaimStatus(body.decision)
-    updated = await claim_store.apply_decision(claim_id, new_status, body.reviewer_note)
+    decided_at = datetime.now(UTC)
+    updated = await claim_store.apply_decision(
+        claim_id,
+        new_status,
+        body.reviewer_note,
+        body.analyst_id,
+    )
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found.")
 
     logger.info(
-        "Adjuster decision recorded",
+        "Human analyst decision recorded",
         extra={
             "claim_id": claim_id,
-            "decision": new_status,
+            "decision": new_status.value,
+            "analyst_id": body.analyst_id,
             "reviewer_note": body.reviewer_note,
+            "decided_at": decided_at.isoformat(),
         },
     )
 
@@ -120,4 +144,6 @@ async def submit_review_decision(
         claim_id=updated.claim_id,
         status=updated.status,
         reviewer_note=updated.reviewer_note,
+        analyst_id=body.analyst_id,
+        decided_at=decided_at,
     )

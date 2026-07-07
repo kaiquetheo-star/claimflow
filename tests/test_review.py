@@ -111,3 +111,50 @@ async def test_review_decision_endpoint(client: TestClient) -> None:
     body = response.json()
     assert body["status"] == "REJECTED"
     assert body["reviewer_note"] == "Fraude confirmada."
+    assert body["analyst_id"] == "demo-analyst"
+    assert body["decided_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_review_decision_accepts_streamlit_payload(client: TestClient) -> None:
+    store = client.app.state.claim_store
+    await store.save_result(
+        "CLM-REV-004",
+        ClaimStatus.APPROVED,
+        {"fraud_risk_score": 0.2},
+    )
+
+    response = client.post(
+        "/api/v1/review/CLM-REV-004/decision",
+        json={
+            "decision": "approved",
+            "analyst_notes": "Payment authorized after review.",
+            "analyst_id": "demo-analyst",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "APPROVED"
+    assert body["reviewer_note"] == "Payment authorized after review."
+
+
+@pytest.mark.asyncio
+async def test_review_decision_rejects_duplicate(client: TestClient) -> None:
+    store = client.app.state.claim_store
+    await store.save_result(
+        "CLM-REV-005",
+        ClaimStatus.HUMAN_REVIEW,
+        {"fraud_risk_score": 0.8},
+    )
+
+    first = client.post(
+        "/api/v1/review/CLM-REV-005/decision",
+        json={"decision": "approved", "analyst_notes": "OK"},
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/v1/review/CLM-REV-005/decision",
+        json={"decision": "rejected", "analyst_notes": "Changed mind"},
+    )
+    assert second.status_code == 409

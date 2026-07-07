@@ -69,17 +69,28 @@ class InMemoryClaimStore:
         claim_id: str,
         status: ClaimStatus,
         reviewer_note: str | None,
+        analyst_id: str | None = None,
     ) -> ClaimSnapshot | None:
         record = self._records.get(claim_id)
         if record is None:
             return None
+        now = datetime.now(UTC)
+        payload = {
+            **record.payload,
+            "human_decision": {
+                "analyst_id": analyst_id or "unknown",
+                "decision": status.value,
+                "analyst_notes": reviewer_note,
+                "recorded_at": now.isoformat(),
+            },
+        }
         updated = ClaimSnapshot(
             claim_id=claim_id,
             status=status,
-            payload=record.payload,
+            payload=payload,
             reviewer_note=reviewer_note,
             created_at=record.created_at,
-            updated_at=datetime.now(UTC),
+            updated_at=now,
         )
         self._records[claim_id] = updated
         return updated
@@ -148,14 +159,26 @@ class PostgresClaimStore:
         claim_id: str,
         status: ClaimStatus,
         reviewer_note: str | None,
+        analyst_id: str | None = None,
     ) -> ClaimSnapshot | None:
         async with self._database.session() as session:
             record = await session.get(ClaimRecord, claim_id)
             if record is None:
                 return None
-            record.status = status
+            now = datetime.now(UTC)
+            payload = {
+                **record.payload,
+                "human_decision": {
+                    "analyst_id": analyst_id or "unknown",
+                    "decision": status.value,
+                    "analyst_notes": reviewer_note,
+                    "recorded_at": now.isoformat(),
+                },
+            }
+            record.status = status.value
+            record.payload = payload
             record.reviewer_note = reviewer_note
-            record.updated_at = datetime.now(UTC)
+            record.updated_at = now
             await session.commit()
             await session.refresh(record)
             return self._to_snapshot(record)

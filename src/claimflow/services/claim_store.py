@@ -70,5 +70,11 @@ class ClaimStore:
         claim_id: str,
         status: ClaimStatus,
         reviewer_note: str | None,
+        analyst_id: str | None = None,
     ) -> ClaimSnapshot | None:
-        return await self._require_backend().apply_decision(claim_id, status, reviewer_note)
+        return await self._require_backend().apply_decision(
+            claim_id,
+            status,
+            reviewer_note,
+            analyst_id,
+        )

@@ -165,7 +165,7 @@ Use this file as mission control. Update checkboxes as tasks are completed.
 | Item | Status | Notes |
 |------|--------|-------|
 | Public GitHub repository | [⚠️] Unknown | Verify remote is public and README links work |
-| Open-source license (MIT recommended) | [❌] Not Started | `pyproject.toml` says **Proprietary**; no `LICENSE` file |
+| Open-source license (MIT recommended) | [✅] Complete | `LICENSE` (MIT, 2026 Kaique Theodoro); `pyproject.toml` updated |
 | Architecture diagram uploaded | [❌] Not Started | Only inline ASCII in README |
 | Demo video recorded and on YouTube | [❌] Not Started | — |
 | Blog post published (LinkedIn/Medium) | [❌] Not Started | — |
