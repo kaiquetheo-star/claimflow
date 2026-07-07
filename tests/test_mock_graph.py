@@ -31,15 +31,50 @@ def _clear_settings_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_mock_llm_structured_outputs_cover_all_schemas() -> None:
+    fraud_text = "Meu apartamento pegou fogo ontem à noite"
     mock = MockLLM()
-    triage = await mock.with_structured_output(TriageResult).ainvoke([])
-    tool = await mock.with_structured_output(ToolDecision).ainvoke([])
-    risk = await mock.with_structured_output(RiskAssessmentResult).ainvoke([])
+    triage = await mock.with_structured_output(TriageResult).ainvoke(
+        [{"role": "user", "content": fraud_text}]
+    )
+    tool = await mock.with_structured_output(ToolDecision).ainvoke(
+        [{"role": "user", "content": fraud_text}]
+    )
+    risk = await mock.with_structured_output(RiskAssessmentResult).ainvoke(
+        [{"role": "user", "content": fraud_text}]
+    )
 
     assert triage.tipo_dano.value == "FOGO"
-    assert tool.requires_tool_call is True
-    assert tool.tool_name == "get_weather_history"
+    assert triage.cliente_nome == "Carlos Silva"
+    assert tool.requires_tool_call is False
     assert risk.fraud_risk_score >= 0.85
+
+
+@pytest.mark.asyncio
+async def test_mock_llm_storm_scenario_auto_approve_fields() -> None:
+    storm_text = "Telhado danificado por vendaval forte ontem à noite"
+    mock = MockLLM()
+    triage = await mock.with_structured_output(TriageResult).ainvoke(
+        [{"role": "user", "content": storm_text}]
+    )
+    risk = await mock.with_structured_output(RiskAssessmentResult).ainvoke(
+        [{"role": "user", "content": storm_text}]
+    )
+
+    assert triage.tipo_dano.value == "VENTO"
+    assert triage.cliente_nome == "Maria Oliveira"
+    assert risk.fraud_risk_score <= 0.2
+    assert risk.requires_human_review is False
+
+
+@pytest.mark.asyncio
+async def test_mock_llm_ambiguous_scenario_defaults() -> None:
+    mock = MockLLM()
+    triage = await mock.with_structured_output(TriageResult).ainvoke([])
+    risk = await mock.with_structured_output(RiskAssessmentResult).ainvoke([])
+
+    assert triage.tipo_dano.value == "OUTRO"
+    assert risk.fraud_risk_score == 0.65
+    assert risk.requires_human_review is True
 
 
 @pytest.mark.asyncio
@@ -49,7 +84,7 @@ async def test_ainvoke_llm_with_fallback_uses_mock_when_all_models_fail() -> Non
         side_effect=Exception("403 AccessDenied.Unpurchased"),
     ):
         result, model = await ainvoke_llm_with_fallback(
-            [{"role": "user", "content": "sinistro"}],
+            [{"role": "user", "content": "incêndio na cozinha"}],
             temperature=0.1,
             configure=lambda llm: llm.with_structured_output(TriageResult),
         )
@@ -66,8 +101,8 @@ async def test_full_graph_with_mock_llm_routes_human_review(tmp_path) -> None:
     initial_state = {
         "claim_id": "CLM-MOCK-001",
         "raw_input": (
-            "Incêndio após tempestade com chuva forte em São Paulo em 15/03/2026. "
-            "Cliente: João Silva."
+            "Incêndio na cozinha em São Paulo em 15/03/2026. "
+            "Cliente: Carlos Silva. A cozinha pegou fogo ontem à noite."
         ),
         "image_path": str(image_file),
         "extracted_data": {},
@@ -112,8 +147,6 @@ async def test_full_graph_with_mock_llm_routes_human_review(tmp_path) -> None:
 
     assert result["status"] == ClaimStatus.HUMAN_REVIEW
     assert result["fraud_risk_score"] >= 0.85
-    assert "get_weather_history" in result["tool_calls_made"]
-    assert result["weather_verification"] is not None
     assert result.get("system_error") is not True
     assert result["extracted_data"]["tipo_dano"] == "FOGO"
     assert result["image_analysis"]["detected_damage_type"] == "AGUA"

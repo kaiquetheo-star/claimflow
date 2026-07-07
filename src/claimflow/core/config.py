@@ -28,7 +28,7 @@ class Settings(BaseSettings):
         description="OpenAI-compatible base URL for DashScope/Qwen.",
     )
     llm_model_name: str = Field(
-        default="qwen-max",
+        default="qwen-turbo",
         description="Primary Qwen model for triage, investigation, and risk assessment.",
     )
     llm_fallback_models: Annotated[list[str], NoDecode] = Field(
@@ -52,6 +52,13 @@ class Settings(BaseSettings):
         default=60.0,
         gt=0,
         description="Maximum seconds to wait for a Qwen text LLM API response.",
+    )
+    use_mock_llm: bool = Field(
+        default=False,
+        description=(
+            "When true, skip DashScope calls and use MockLLM deterministic scenarios "
+            "for demos and testing."
+        ),
     )
     risk_threshold: float = Field(
         default=0.7,

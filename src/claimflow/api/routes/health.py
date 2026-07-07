@@ -19,10 +19,17 @@ async def health_check() -> dict[str, object]:
     settings = get_settings()
     alibaba_status = await verify_alibaba_cloud_connection(settings)
 
-    return {
+    response: dict[str, object] = {
         "status": alibaba_status["status"],
         "project": settings.project_name,
         "version": __version__,
         "environment": settings.environment,
+        "mock_mode": settings.use_mock_llm,
         "alibaba_cloud_services": alibaba_status["alibaba_cloud_services"],
     }
+    if settings.use_mock_llm:
+        response["mock_mode_warning"] = (
+            "System is using MockLLM simulated AI responses for demonstration. "
+            "Set USE_MOCK_LLM=false and configure DashScope credentials for live Qwen Cloud."
+        )
+    return response

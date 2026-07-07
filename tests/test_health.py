@@ -22,6 +22,7 @@ def _build_test_settings() -> Settings:
         project_name=_TEST_PROJECT_NAME,
         storage_backend="local",
         local_upload_dir="./test_uploads",
+        use_mock_llm=False,
     )
 
 
@@ -68,6 +69,7 @@ def test_health_endpoint(client: TestClient) -> None:
     assert "version" in body
     assert "environment" in body
     assert "alibaba_cloud_services" in body
+    assert body["mock_mode"] is False
 
     services = body["alibaba_cloud_services"]
     assert services["qwen_cloud"]["status"] == "connected"

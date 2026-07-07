@@ -19,6 +19,7 @@ _ENV_PATCH = {
     "ALIBABA_CLOUD_ACCESS_KEY_SECRET": "test-secret",
     "OSS_BUCKET_NAME": "test-bucket",
     "OSS_ENDPOINT": "https://oss-test.aliyuncs.com",
+    "USE_MOCK_LLM": "false",
 }
 
 
@@ -77,13 +78,52 @@ async def test_ainvoke_llm_with_fallback_uses_mock_when_all_models_fail() -> Non
         side_effect=Exception("403 AccessDenied.Unpurchased"),
     ):
         result, model = await ainvoke_llm_with_fallback(
-            [{"role": "user", "content": "sinistro"}],
+            [{"role": "user", "content": "incêndio na cozinha"}],
             temperature=0.1,
             configure=lambda llm: llm.with_structured_output(TriageResult),
         )
 
     assert model == MOCK_MODEL_NAME
     assert result.tipo_dano.value == "FOGO"
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_llm_with_fallback_uses_mock_when_use_mock_llm_enabled() -> None:
+    from claimflow.core.config import Settings, get_settings
+    from pydantic import SecretStr
+
+    mock_settings = Settings(
+        dashscope_api_key=SecretStr("test-key"),
+        alibaba_cloud_access_key_id=SecretStr("test-id"),
+        alibaba_cloud_access_key_secret=SecretStr("test-secret"),
+        oss_bucket_name="test-bucket",
+        oss_endpoint="https://oss-test.aliyuncs.com",
+        use_mock_llm=True,
+    )
+
+    with patch("claimflow.services.llm_service.get_settings", return_value=mock_settings):
+        get_settings.cache_clear()
+        result, model = await ainvoke_llm_with_fallback(
+            [{"role": "user", "content": "incêndio na cozinha"}],
+            temperature=0.1,
+            settings=mock_settings,
+            configure=lambda llm: llm.with_structured_output(TriageResult),
+            claim_id="CLM-MOCK-001",
+        )
+
+    assert model == MOCK_MODEL_NAME
+    assert result.tipo_dano.value == "FOGO"
+
+    with patch(
+        "claimflow.services.llm_service.create_chat_llm",
+        side_effect=AssertionError("DashScope should not be called when USE_MOCK_LLM=true"),
+    ):
+        await ainvoke_llm_with_fallback(
+            [{"role": "user", "content": "incêndio na cozinha"}],
+            temperature=0.1,
+            settings=mock_settings,
+            configure=lambda llm: llm.with_structured_output(TriageResult),
+        )
 
 
 @pytest.mark.asyncio
@@ -109,7 +149,7 @@ async def test_ainvoke_llm_with_fallback_mock_after_runnable_failures() -> None:
         ),
     ):
         result, model = await ainvoke_llm_with_fallback(
-            [{"role": "user", "content": "hi"}],
+            [{"role": "user", "content": "incêndio na cozinha"}],
             temperature=0.1,
             configure=configure,
         )

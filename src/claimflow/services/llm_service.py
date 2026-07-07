@@ -18,6 +18,11 @@ from claimflow.models.agent_schemas import (
     ToolDecision,
     TriageResult,
 )
+from claimflow.services.mock_scenarios import (
+    MockScenario,
+    detect_mock_scenario,
+    get_mock_scenario_info,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -27,6 +32,14 @@ logger = get_logger(__name__)
 T = TypeVar("T")
 
 MOCK_MODEL_NAME = "mock-llm"
+
+MOCK_MODE_INFO_MESSAGE = (
+    "🎭 MOCK MODE: Using deterministic scenarios for demo "
+    "(DashScope models not available in this account tier)"
+)
+
+# Legacy alias kept for backward-compatible log filters.
+MOCK_SCENARIO_FRAUD_DETECTION = "FRAUD_CLAIM"
 
 _ACCESS_DENIED_MARKERS = (
     "403",
@@ -74,6 +87,26 @@ def is_transient_llm_error(exc: BaseException) -> bool:
     return any(marker in message for marker in _TRANSIENT_MARKERS)
 
 
+def log_mock_llm_scenario_selection(raw_input: str, *, claim_id: str | None = None) -> None:
+    """Log scenario detection once per claim for transparent demo mode."""
+    scenario, keyword = detect_mock_scenario(raw_input)
+    keyword_detail = f" (keyword: '{keyword}')" if keyword else " (default — no keywords)"
+    resolved_id = claim_id or "pending"
+    logger.info(
+        f"🎭 MockLLM: Detected scenario {scenario.value}{keyword_detail}",
+        extra={
+            "mock_scenario": scenario.value,
+            "mock_keyword": keyword,
+            "claim_id": resolved_id,
+            "model": MOCK_MODEL_NAME,
+        },
+    )
+    logger.info(
+        "🎭 MockLLM: Returning deterministic response for demo consistency",
+        extra={"mock_scenario": scenario.value, "claim_id": resolved_id},
+    )
+
+
 def _should_try_next_model(exc: BaseException, *, has_more: bool) -> bool:
     """Return True when the fallback chain should continue with the next model."""
     return has_more and (is_model_access_error(exc) or is_transient_llm_error(exc))
@@ -107,49 +140,140 @@ def _extract_message_text(messages: Sequence[BaseMessage | dict[str, Any]]) -> s
     return "\n".join(parts)
 
 
+def _build_storm_triage() -> TriageResult:
+    return TriageResult(
+        cliente_nome="Maria Oliveira",
+        tipo_dano=TipoDano.VENTO,
+        localizacao="São Paulo, SP",
+        descricao_resumida="Telhado danificado por vendaval forte ontem à noite",
+        data_incidente=datetime(2026, 7, 6),
+    )
+
+
+def _build_fraud_triage() -> TriageResult:
+    return TriageResult(
+        cliente_nome="Carlos Silva",
+        tipo_dano=TipoDano.FOGO,
+        localizacao="Rio de Janeiro, RJ",
+        descricao_resumida="Cozinha pegou fogo ontem",
+        data_incidente=datetime(2026, 7, 6),
+    )
+
+
+def _build_ambiguous_triage() -> TriageResult:
+    return TriageResult(
+        cliente_nome="João Santos",
+        tipo_dano=TipoDano.OUTRO,
+        localizacao="Belo Horizonte, MG",
+        descricao_resumida="Dano na propriedade, preciso de ajuda",
+        data_incidente=None,
+    )
+
+
+def _build_storm_tool_decision() -> ToolDecision:
+    return ToolDecision(
+        requires_tool_call=True,
+        tool_name="get_weather_history",
+        tool_arguments={"location": "São Paulo, SP", "date": "2026-07-06"},
+        reasoning=(
+            "MockLLM: relato menciona vendaval/tempestade — "
+            "verificação climática obrigatória para validar o sinistro."
+        ),
+    )
+
+
+def _build_fraud_tool_decision() -> ToolDecision:
+    return ToolDecision(
+        requires_tool_call=False,
+        tool_name="none",
+        tool_arguments={},
+        reasoning=(
+            "MockLLM: incêndio doméstico sem menção a eventos climáticos — "
+            "verificação meteorológica não necessária."
+        ),
+    )
+
+
+def _build_ambiguous_tool_decision() -> ToolDecision:
+    return ToolDecision(
+        requires_tool_call=False,
+        tool_name="none",
+        tool_arguments={},
+        reasoning=(
+            "MockLLM: relato vago sem localização, data ou evento climático — "
+            "nenhuma ferramenta externa aplicável."
+        ),
+    )
+
+
+def _build_storm_risk() -> RiskAssessmentResult:
+    return RiskAssessmentResult(
+        fraud_risk_score=0.15,
+        severity_score=0.45,
+        justificativa_risco=(
+            "MockLLM: sinistro por vendaval coerente com verificação climática "
+            "(chuva forte e ventos intensos confirmados). Análise visual consistente "
+            "com dano por vento (consistency_score=0.9). Baixo risco de fraude."
+        ),
+        requires_human_review=False,
+    )
+
+
+def _build_fraud_risk() -> RiskAssessmentResult:
+    return RiskAssessmentResult(
+        fraud_risk_score=0.88,
+        severity_score=0.70,
+        justificativa_risco=(
+            "MockLLM: relato de incêndio contradiz análise visual (vazamento de água, "
+            "consistency_score=0.1). Condições climáticas ensolaradas sem vento reforçam "
+            "inconsistência. Alta probabilidade de fraude — escalação para revisão humana."
+        ),
+        requires_human_review=True,
+    )
+
+
+def _build_ambiguous_risk() -> RiskAssessmentResult:
+    return RiskAssessmentResult(
+        fraud_risk_score=0.65,
+        severity_score=0.50,
+        justificativa_risco=(
+            "MockLLM: relato insuficiente para conclusão automática. "
+            "Análise visual inconclusiva (consistency_score=0.5). "
+            "Condições climáticas moderadas. Revisão humana necessária."
+        ),
+        requires_human_review=True,
+    )
+
+
 def build_mock_structured_output(
     schema: type[Any],
     messages: Sequence[BaseMessage | dict[str, Any]],
 ) -> Any:
-    """Return deterministic structured outputs simulating a fraud investigation scenario."""
+    """Return deterministic structured outputs for hackathon demo scenarios."""
     text = _extract_message_text(messages)
+    scenario, _keyword = detect_mock_scenario(text)
     name = _schema_name(schema)
 
     if schema is TriageResult or name == "TriageResult":
-        return TriageResult(
-            cliente_nome="João Silva",
-            tipo_dano=TipoDano.FOGO,
-            localizacao="São Paulo, SP",
-            descricao_resumida=(
-                "Relato de incêndio após tempestade com chuva forte (resposta mock offline)."
-            ),
-            data_incidente=datetime(2026, 3, 15),
-        )
+        if scenario is MockScenario.STORM_CLAIM:
+            return _build_storm_triage()
+        if scenario is MockScenario.FRAUD_CLAIM:
+            return _build_fraud_triage()
+        return _build_ambiguous_triage()
 
     if schema is ToolDecision or name == "ToolDecision":
-        return ToolDecision(
-            requires_tool_call=True,
-            tool_name="get_weather_history",
-            tool_arguments={"location": "São Paulo, SP", "date": "2026-03-15"},
-            reasoning=(
-                "Mock offline: relato menciona tempestade/chuva — "
-                "verificação climática obrigatória."
-            ),
-        )
+        if scenario is MockScenario.STORM_CLAIM:
+            return _build_storm_tool_decision()
+        if scenario is MockScenario.FRAUD_CLAIM:
+            return _build_fraud_tool_decision()
+        return _build_ambiguous_tool_decision()
 
     if schema is RiskAssessmentResult or name == "RiskAssessmentResult":
-        justification = (
-            "Mock offline: texto relata fogo/tempestade, imagem indica água e clima verificado "
-            "como ensolarado — alta probabilidade de inconsistência fraudulenta."
-        )
-        if "consistência" in text.lower() or "verificação climática" in text.lower():
-            justification += " Evidências cruzadas reforçam escalação."
-        return RiskAssessmentResult(
-            fraud_risk_score=0.88,
-            severity_score=0.72,
-            justificativa_risco=justification,
-            requires_human_review=True,
-        )
+        if scenario is MockScenario.STORM_CLAIM:
+            return _build_storm_risk()
+        if scenario is MockScenario.FRAUD_CLAIM:
+            return _build_fraud_risk()
+        return _build_ambiguous_risk()
 
     raise ValueError(f"MockLLM has no canned response for schema {name}")
 
@@ -210,9 +334,33 @@ def create_chat_llm(
     )
 
 
+def _log_mock_llm_usage(
+    *,
+    claim_id: str | None = None,
+    raw_input: str | None = None,
+) -> None:
+    """Emit clear INFO logs when MockLLM serves a request."""
+    logger.info(MOCK_MODE_INFO_MESSAGE)
+    scenario, keyword = detect_mock_scenario(raw_input or "")
+    keyword_detail = f" (keyword: '{keyword}')" if keyword else ""
+    resolved_id = claim_id or "pending"
+    logger.info(
+        f"🎭 MockLLM scenario: {scenario.value}{keyword_detail} (claim_id={resolved_id})",
+        extra={
+            "mock_scenario": scenario.value,
+            "mock_keyword": keyword,
+            "claim_id": resolved_id,
+            "model": MOCK_MODEL_NAME,
+        },
+    )
+
+
 def get_triage_llm(settings: Settings | None = None) -> ChatTongyi | MockLLM:
     """Return a low-temperature LLM for triage, falling back to MockLLM on init failure."""
     resolved = settings or get_settings()
+    if resolved.use_mock_llm:
+        _log_mock_llm_usage()
+        return MockLLM()
     try:
         return create_chat_llm(resolved.llm_model_name, temperature=0.1, settings=resolved)
     except Exception as exc:
@@ -220,12 +368,16 @@ def get_triage_llm(settings: Settings | None = None) -> ChatTongyi | MockLLM:
             "ChatTongyi initialization failed; using MockLLM",
             extra={"error": str(exc), "model": resolved.llm_model_name},
         )
+        _log_mock_llm_usage()
         return MockLLM()
 
 
 def get_risk_llm(settings: Settings | None = None) -> ChatTongyi | MockLLM:
     """Return an LLM for risk assessment, falling back to MockLLM on init failure."""
     resolved = settings or get_settings()
+    if resolved.use_mock_llm:
+        _log_mock_llm_usage()
+        return MockLLM()
     try:
         return create_chat_llm(resolved.llm_model_name, temperature=0.3, settings=resolved)
     except Exception as exc:
@@ -233,6 +385,7 @@ def get_risk_llm(settings: Settings | None = None) -> ChatTongyi | MockLLM:
             "ChatTongyi initialization failed; using MockLLM",
             extra={"error": str(exc), "model": resolved.llm_model_name},
         )
+        _log_mock_llm_usage()
         return MockLLM()
 
 
@@ -240,12 +393,17 @@ async def _invoke_mock_llm(
     messages: list[Any],
     *,
     configure: Callable[[MockLLM], T] | None,
+    claim_id: str | None = None,
+    configured_mode: bool = False,
 ) -> tuple[Any, str]:
-    """Invoke MockLLM as the final offline fallback."""
-    logger.warning(
-        "All DashScope models unavailable; using MockLLM offline fallback",
-        extra={"model": MOCK_MODEL_NAME},
-    )
+    """Invoke MockLLM as the final offline fallback or when ``USE_MOCK_LLM=true``."""
+    if not configured_mode:
+        logger.warning(
+            "All DashScope models unavailable; using MockLLM offline fallback",
+            extra={"model": MOCK_MODEL_NAME},
+        )
+    raw_input = _extract_message_text(messages)
+    _log_mock_llm_usage(claim_id=claim_id, raw_input=raw_input)
     mock = MockLLM()
     runnable: Any = configure(mock) if configure else mock
     result = await runnable.ainvoke(messages)
@@ -260,12 +418,21 @@ async def ainvoke_llm_with_fallback(
     configure: Callable[[ChatTongyi | MockLLM], T] | None = None,
     preferred_model: str | None = None,
     timeout_seconds: float | None = None,
+    claim_id: str | None = None,
 ) -> tuple[Any, str]:
     """Invoke ChatTongyi with model fallback, then MockLLM if all models fail."""
     resolved = settings or get_settings()
+    if resolved.use_mock_llm:
+        return await _invoke_mock_llm(
+            messages,
+            configure=configure,
+            claim_id=claim_id,
+            configured_mode=True,
+        )
+
     models = [preferred_model] if preferred_model else get_llm_model_chain(resolved)
     if preferred_model == MOCK_MODEL_NAME:
-        return await _invoke_mock_llm(messages, configure=configure)
+        return await _invoke_mock_llm(messages, configure=configure, claim_id=claim_id)
 
     timeout = timeout_seconds if timeout_seconds is not None else resolved.llm_timeout_seconds
     errors: list[str] = []
@@ -309,4 +476,4 @@ async def ainvoke_llm_with_fallback(
         )
         return result, model
 
-    return await _invoke_mock_llm(messages, configure=configure)
+    return await _invoke_mock_llm(messages, configure=configure, claim_id=claim_id)

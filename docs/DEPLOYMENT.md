@@ -114,34 +114,74 @@ Requires valid `ALIBABA_CLOUD_ACCESS_KEY_ID` and `ALIBABA_CLOUD_ACCESS_KEY_SECRE
 
 ---
 
-## 5. MockLLM — When It Activates
+## 5. 🎭 Demo Mode vs Production Mode
 
-**MockLLM** is an offline fallback that returns deterministic structured responses when live Qwen models are unavailable. There is no separate toggle — it activates automatically.
+Claimflow uses a **feature-flag pattern** common in enterprise AI systems: the same pipeline runs in both modes; only the inference backend changes.
 
-### MockLLM is used when:
+| Mode | `USE_MOCK_LLM` | AI Inference | Use case |
+|------|----------------|--------------|----------|
+| **Demo / hackathon** | `true` | MockLLM (deterministic scenarios) | Consistent video demos, offline testing |
+| **Production** | `false` | Live Qwen Cloud via DashScope | Real-world claim processing |
+
+### What MockLLM provides
+
+MockLLM returns **three deterministic scenarios** selected by keywords in the claim text:
+
+| Scenario | Trigger keywords | Expected outcome |
+|----------|------------------|------------------|
+| **STORM** (legitimate) | `tempestade`, `chuva`, `vendaval`, `vento` | Auto-approved (~0.15 risk) |
+| **FRAUD** (obvious) | `fogo`, `incêndio`, `queimou` | Human review → reject (~0.88 risk) |
+| **AMBIGUOUS** (default) | No keyword match | Human review (~0.65 risk) |
+
+This ensures every demo run produces predictable, realistic results — no random LLM variance.
+
+### Real DashScope connectivity is still proven
+
+Even in demo mode, the `/api/v1/health` endpoint probes the real DashScope API (`GET /models` → HTTP 200). The startup banner confirms:
+
+```
+║ Real DashScope API: ✅ CONNECTED (health check passed) ║
+║ AI Inference: 🎭 MockLLM (deterministic scenarios)        ║
+```
+
+This demonstrates that Alibaba Cloud integration is live; only inference is routed through the feature flag.
+
+### Switch to production
+
+Change **one environment variable** and restart the backend:
+
+```bash
+USE_MOCK_LLM=false
+```
+
+No code changes required. The LangGraph pipeline, vision service, weather tools, and human-in-the-loop routing remain identical.
+
+### MockLLM offline fallback (automatic)
+
+MockLLM also activates automatically when DashScope models are unavailable (no feature flag needed):
 
 1. **ChatTongyi initialization fails** (invalid config at startup)
-2. **All models in the fallback chain fail** — e.g. `qwen-max` → `qwen-plus` → `qwen-turbo` all return 403, timeout, or access-denied errors
-3. **Qwen-VL vision models fail** — returns mock vision analysis with intentional text↔image inconsistency
+2. **All models in the fallback chain fail** — e.g. 403, timeout, access-denied
+3. **Qwen-VL vision models fail** — returns mock vision analysis
 
-### Use live Qwen (recommended for demos)
-
-1. Set a valid `DASHSCOPE_API_KEY` in `.env`
-2. Ensure models (`qwen-max`, `qwen-vl-max`) are **purchased/enabled** in the [DashScope console](https://dashscope.console.aliyun.com/)
-3. Restart the backend
-4. Confirm via health check: `alibaba_cloud_services.qwen_cloud.status` should be `"connected"`
-
-### Recognise MockLLM in logs
+Recognise automatic fallback in logs:
 
 ```
 WARNING  All DashScope models unavailable; using MockLLM offline fallback
+🎭 MockLLM: Detected scenario FRAUD_CLAIM (keyword: 'fogo')
 ```
-
-MockLLM outputs simulate a **high-fraud scenario** (fraud score ~0.88) — useful for offline development but may confuse live demos if DashScope credentials are misconfigured.
 
 ---
 
-## 6. Makefile Quick Reference
+## 6. MockLLM — Legacy Reference
+
+_See section 5 above for the full demo vs production guide._
+
+When `USE_MOCK_LLM` is not set, MockLLM still serves as the last-resort fallback in the model chain (`qwen-max` → `qwen-plus` → `qwen-turbo` → MockLLM).
+
+---
+
+## 7. Makefile Quick Reference
 
 | Command | Description |
 |---------|-------------|
@@ -154,7 +194,7 @@ MockLLM outputs simulate a **high-fraud scenario** (fraud score ~0.88) — usefu
 
 ---
 
-## 7. Optional: PostgreSQL
+## 8. Optional: PostgreSQL
 
 For persistent claim storage and LangGraph checkpointing:
 

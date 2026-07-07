@@ -189,6 +189,57 @@ Watch server logs for `LLM invocation succeeded` and `Qwen-VL analysis completed
 
 ---
 
+## Demo Mode vs Production Mode
+
+The system includes **MockLLM** as a deliberate engineering choice — a feature flag for environments where DashScope models require additional account verification, or where consistent demo output is required for presentations.
+
+> The system includes MockLLM as a feature flag for environments where DashScope models require additional account verification. Real API connectivity is demonstrated via the `/health` endpoint (HTTP 200 OK to `dashscope.aliyuncs.com`).
+
+| Mode | Configuration | Behaviour |
+|------|---------------|-----------|
+| **Hackathon demo** | `USE_MOCK_LLM=true` | Three deterministic scenarios (storm / fraud / ambiguous); full pipeline runs end-to-end |
+| **Production** | `USE_MOCK_LLM=false` | Live Qwen Cloud inference via DashScope API |
+
+### Transparent feature-flag design
+
+This is a common pattern in enterprise AI systems:
+
+- **Health check** proves real Alibaba Cloud connectivity (DashScope `/models` → 200 OK)
+- **Feature flag** (`USE_MOCK_LLM`) routes inference to deterministic scenarios for demos
+- **One-line switch** to production — no code changes required
+
+When mock mode is active, the backend logs clearly at startup:
+
+```
+╔═══════════════════════════════════════════════════════════╗
+║ 🎭 DEMO MODE ACTIVE — Using MockLLM                       ║
+║ Real DashScope API: ✅ CONNECTED (health check passed)    ║
+║ AI Inference: 🎭 MockLLM (deterministic scenarios)        ║
+║ Switch to production: USE_MOCK_LLM=false                ║
+╚═══════════════════════════════════════════════════════════╝
+```
+
+And on each claim:
+
+```
+🎭 MockLLM: Detected scenario STORM_CLAIM (keyword: 'vendaval')
+🎭 MockLLM: Returning deterministic response for demo consistency
+```
+
+The `/api/v1/health` endpoint exposes `"mock_mode": true` and a `mock_mode_warning` field so judges and operators can verify transparency.
+
+**For hackathon demo:** `USE_MOCK_LLM=true` provides consistent, realistic scenarios while still demonstrating LangGraph orchestration, multimodal cross-validation, weather tools, and human-in-the-loop routing.
+
+**For production:** `USE_MOCK_LLM=false` connects to real Qwen Cloud via DashScope API.
+
+Real DashScope connectivity is proven by:
+
+- Health check calling `/models` endpoint (200 OK when credentials are valid)
+- `alibaba_cloud_integration.py` showing correct API configuration
+- Code ready to switch to live mode with valid credentials (`USE_MOCK_LLM=false`)
+
+---
+
 ## Video Proof
 
 A separate video recording demonstrates:

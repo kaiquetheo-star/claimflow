@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
-from claimflow.agents.states import ClaimStatus
+from claimflow.models.enums import ClaimStatus
 
 
 class ImageAnalysisResult(BaseModel):

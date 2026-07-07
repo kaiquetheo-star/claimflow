@@ -114,6 +114,9 @@ Open the dashboard at **http://localhost:8501**.
 | `make test`   | Run pytest test suite                    |
 | `make run`          | Start uvicorn development server         |
 | `make run-frontend` | Start Streamlit demo dashboard (port 8501) |
+| `make capture-proofs` | Capture Alibaba Cloud console screenshots |
+| `make record-demo` | Record automated hackathon demo video |
+| `make install-playwright` | Install Playwright Chromium browser |
 | `make clean`        | Remove venv and build artifacts          |
 
 ---
@@ -185,6 +188,15 @@ curl http://localhost:8000/api/v1/health | jq
 ```
 
 The response includes `alibaba_cloud_services` with live status for DashScope (Qwen Cloud), OSS, and RAM credentials. See [docs/ALIBABA_CLOUD_PROOF.md](docs/ALIBABA_CLOUD_PROOF.md) for the expected JSON schema and console verification steps.
+
+### Automated artifact capture
+
+```bash
+make install-playwright   # one-time: install Chromium for Playwright
+
+make capture-proofs       # headed browser → docs/proof/*.png (login when prompted)
+make record-demo          # auto-runs demo → docs/demo-recording.mp4
+```
 
 ---
 

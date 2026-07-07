@@ -11,6 +11,8 @@ from typing import Any
 import requests
 import streamlit as st
 
+from claimflow.services.mock_scenarios import get_mock_scenario_info
+
 API_BASE_URL = "http://localhost:8000/api/v1"
 SUBMIT_URL = f"{API_BASE_URL}/claims/submit"
 HEALTH_URL = f"{API_BASE_URL}/health"
@@ -235,6 +237,43 @@ def _inject_styles() -> None:
             border-radius: 0 6px 6px 0;
             font-size: 0.85rem;
         }
+
+        .demo-mode-banner {
+            background: linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%);
+            border: 2px solid #FF6A00;
+            border-radius: 12px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.25rem;
+            box-shadow: 0 2px 8px rgba(255, 106, 0, 0.15);
+        }
+        .demo-mode-banner h3 {
+            margin: 0 0 0.5rem 0;
+            color: #9a3412;
+            font-size: 1.1rem;
+        }
+        .demo-mode-banner p {
+            margin: 0.25rem 0;
+            color: #7c2d12;
+            font-size: 0.9rem;
+        }
+
+        .scenario-panel {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 0.75rem;
+            margin-top: 0.5rem;
+        }
+        .scenario-panel .scenario-tag {
+            display: inline-block;
+            background: #FF6A00;
+            color: white;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -262,6 +301,68 @@ def check_backend_health() -> bool:
         return response.status_code == 200
     except requests.RequestException:
         return False
+
+
+def fetch_health_status() -> dict[str, Any] | None:
+    """Return parsed ``/health`` JSON or ``None`` when the backend is unreachable."""
+    try:
+        response = requests.get(HEALTH_URL, timeout=3)
+        if response.status_code == 200:
+            payload = response.json()
+            return payload if isinstance(payload, dict) else None
+    except (requests.RequestException, ValueError):
+        pass
+    return None
+
+
+def _render_mock_mode_banner() -> None:
+    """Show a prominent banner when the backend runs in MockLLM demo mode."""
+    health = fetch_health_status()
+    if not health or not health.get("mock_mode"):
+        return
+
+    qwen = (health.get("alibaba_cloud_services") or {}).get("qwen_cloud", {})
+    qwen_ok = qwen.get("status") == "connected"
+    connectivity_line = (
+        "Real Qwen Cloud connectivity verified via /health endpoint (200 OK)."
+        if qwen_ok
+        else "DashScope health check pending — verify DASHSCOPE_API_KEY in .env."
+    )
+
+    st.markdown(
+        f"""
+        <div class="demo-mode-banner">
+            <h3>🎭 Demo Mode Active</h3>
+            <p>The system is using deterministic MockLLM scenarios for consistent demonstration.</p>
+            <p>{connectivity_line}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_current_scenario_panel() -> None:
+    """Show which MockLLM scenario will be selected from the current claim text."""
+    health = fetch_health_status()
+    if not health or not health.get("mock_mode"):
+        return
+
+    claim_text = st.session_state.get("input_raw_text", "") or ""
+    info = get_mock_scenario_info(claim_text)
+    keyword_line = f"**Why:** {info['keyword_reason']}"
+
+    st.markdown("### 📊 Current Scenario")
+    st.markdown(
+        f"""
+        <div class="scenario-panel">
+            <span class="scenario-tag">{info['label']}</span>
+            <div><strong>{info['title']}</strong></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(keyword_line.replace("**Why:** ", ""))
+    st.caption(f"Expected: {info['expected_outcome']}")
 
 
 def _render_sidebar() -> None:
@@ -301,6 +402,10 @@ def _render_sidebar() -> None:
                     st.rerun()
             if st.session_state.demo_hint:
                 st.info(st.session_state.demo_hint)
+
+        st.divider()
+
+        _render_current_scenario_panel()
 
         st.divider()
         st.markdown("### 📋 Decision History")
@@ -988,6 +1093,7 @@ def main() -> None:
     _inject_styles()
     _render_sidebar()
     _render_header()
+    _render_mock_mode_banner()
 
     left_col, right_col = st.columns([1, 1], gap="large")
 

@@ -1,4 +1,5 @@
-.PHONY: install lint test coverage run run-frontend clean help
+.PHONY: install install-playwright lint test coverage run run-frontend \
+	capture-proofs record-demo clean help
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
@@ -15,6 +16,9 @@ install: ## Create virtualenv and install dependencies
 	python3 -m venv $(VENV)
 	$(PIP) install --upgrade pip
 	$(PIP) install -e ".[dev]"
+
+install-playwright: ## Install Playwright Chromium browser for automation scripts
+	$(PYTHON) -m playwright install chromium
 
 lint: ## Run ruff linter and formatter checks
 	$(RUFF) check src tests
@@ -35,6 +39,12 @@ run: ## Start the FastAPI development server
 
 run-frontend: ## Start the Streamlit demo dashboard
 	$(STREAMLIT) run streamlit_app.py --server.port 8501
+
+capture-proofs: ## Capture Alibaba Cloud console screenshots (headed browser)
+	$(PYTHON) scripts/capture_alibaba_proofs.py
+
+record-demo: ## Record automated hackathon demo video
+	$(PYTHON) scripts/record_demo.py
 
 clean: ## Remove virtualenv and build artifacts
 	rm -rf $(VENV) build dist *.egg-info .pytest_cache .ruff_cache .coverage htmlcov

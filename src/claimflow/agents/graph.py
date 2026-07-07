@@ -13,7 +13,12 @@ from claimflow.agents.states import ClaimAgentState, ClaimStatus
 from claimflow.core.config import get_settings
 from claimflow.core.logging import get_logger
 from claimflow.models.agent_schemas import RiskAssessmentResult, ToolDecision, TriageResult
-from claimflow.services.llm_service import LLMInvocationError, ainvoke_llm_with_fallback
+from claimflow.services.llm_service import (
+    LLMInvocationError,
+    MOCK_MODEL_NAME,
+    ainvoke_llm_with_fallback,
+    log_mock_llm_scenario_selection,
+)
 from claimflow.services.vision_service import VisionService, VisionServiceError
 from claimflow.tools.weather_tool import get_weather_history
 
@@ -275,11 +280,14 @@ async def triage_node(state: ClaimAgentState) -> ClaimAgentState:
     ]
 
     try:
-        triage_result, _model = await ainvoke_llm_with_fallback(
+        triage_result, model = await ainvoke_llm_with_fallback(
             messages,
             temperature=0.1,
             configure=lambda llm: llm.with_structured_output(TriageResult),
+            claim_id=claim_id,
         )
+        if model == MOCK_MODEL_NAME:
+            log_mock_llm_scenario_selection(state["raw_input"], claim_id=claim_id)
     except LLMInvocationError as exc:
         return _system_error_state(state, "triage", f"Triage failed: {exc}")
     except Exception as exc:
@@ -364,6 +372,7 @@ async def investigation_node(state: ClaimAgentState) -> ClaimAgentState:
             messages,
             temperature=0.1,
             configure=lambda llm: llm.with_structured_output(ToolDecision),
+            claim_id=claim_id,
         )
     except LLMInvocationError as exc:
         return _system_error_state(state, "investigation", f"Investigation failed: {exc}")
@@ -499,6 +508,7 @@ async def risk_assessment_node(state: ClaimAgentState) -> ClaimAgentState:
             messages,
             temperature=0.3,
             configure=lambda llm: llm.with_structured_output(RiskAssessmentResult),
+            claim_id=claim_id,
         )
     except LLMInvocationError as exc:
         return _system_error_state(state, "risk_assessment", f"Risk assessment failed: {exc}")

@@ -16,6 +16,7 @@ from claimflow.core.checkpoint import CheckpointManager
 from claimflow.core.config import Settings, get_settings
 from claimflow.core.logging import get_logger, setup_logging
 from claimflow.db.session import Database
+from claimflow.services.alibaba_cloud_integration import verify_alibaba_cloud_connection
 from claimflow.services.claim_store import ClaimStore
 from claimflow.tools.factory import get_storage_client, reset_storage_client_cache
 
@@ -52,8 +53,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "storage_client": type(storage).__name__,
             "checkpoint_backend": checkpoint_manager.backend,
             "claim_store_backend": claim_store.backend,
+            "use_mock_llm": settings.use_mock_llm,
         },
     )
+    if settings.use_mock_llm:
+        alibaba_status = await verify_alibaba_cloud_connection(settings)
+        qwen_status = alibaba_status["alibaba_cloud_services"]["qwen_cloud"].get("status", "")
+        dashscope_line = (
+            "✅ CONNECTED (health check passed)"
+            if qwen_status == "connected"
+            else "⚠️  UNREACHABLE (check credentials)"
+        )
+        logger.info(
+            "\n"
+            "╔═══════════════════════════════════════════════════════════╗\n"
+            "║ 🎭 DEMO MODE ACTIVE — Using MockLLM                       ║\n"
+            f"║ Real DashScope API: {dashscope_line:<38} ║\n"
+            "║ AI Inference: 🎭 MockLLM (deterministic scenarios)        ║\n"
+            "║ Switch to production: USE_MOCK_LLM=false                ║\n"
+            "╚═══════════════════════════════════════════════════════════╝"
+        )
     yield
 
     await claim_store.shutdown()

@@ -1,18 +1,10 @@
 """State definitions for the claim processing LangGraph agent."""
 
-from enum import StrEnum
 from typing import Any
 
 from typing_extensions import TypedDict
 
-
-class ClaimStatus(StrEnum):
-    """Lifecycle status of a claim within the agent pipeline."""
-
-    PENDING = "PENDING"
-    HUMAN_REVIEW = "HUMAN_REVIEW"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
+from claimflow.models.enums import ClaimStatus
 
 
 class ClaimAgentState(TypedDict, total=False):
