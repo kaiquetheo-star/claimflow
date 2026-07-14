@@ -133,15 +133,23 @@ Configurable thresholds (`.env`):
 
 ## 👤 Human-in-the-Loop Pattern
 
-High-risk or ambiguous claims are **paused** at the `human_review` node rather than auto-approved.
+High-risk or ambiguous claims are **paused with a real LangGraph interrupt** before `human_review` runs — not merely stamped and ended.
 
 ```
 risk_assessment
       │
-      ├── composite ≥ 0.9 ──────────► rejected
-      ├── composite ≥ 0.7 or flags ─► human_review ──► adjuster decides
-      └── low risk ─────────────────► approval
+      ├── composite ≥ 0.9 ──────────► rejected → END
+      ├── composite ≥ 0.7 or flags ─► ⏸ interrupt_before human_review
+      │                                      │
+      │                              adjuster POST /decision
+      │                                      │
+      │                              update_state + ainvoke resume
+      │                                      │
+      │                              human_review → END
+      └── low risk ─────────────────► approval → END
 ```
+
+Full walkthrough (sequence diagram, failure modes, demo tip): **[HITL_INTERRUPT.md](HITL_INTERRUPT.md)**.
 
 ### API endpoints
 
@@ -149,11 +157,11 @@ risk_assessment
 |----------|---------|
 | `GET /api/v1/review/queue` | List claims awaiting review |
 | `GET /api/v1/review/{claim_id}` | Full claim snapshot for adjuster |
-| `POST /api/v1/review/{claim_id}/decision` | Record approve / reject with analyst ID |
+| `POST /api/v1/review/{claim_id}/decision` | `aupdate_state` + resume graph, then persist decision |
 
 ### Streamlit UI
 
-The dashboard (`streamlit_app.py`) shows a confirmation dialog, audit trail, and fraud indicators for `HUMAN_REVIEW` claims. Demo Mode includes pre-built fraud and legitimate scenarios.
+The dashboard shows **“Waiting for human decision…”** while `awaiting_human_decision` / `graph_interrupted` is true, then Approve/Reject controls that resume the graph. Demo Mode includes pre-built fraud and legitimate scenarios.
 
 ---
 

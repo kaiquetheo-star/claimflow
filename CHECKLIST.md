@@ -18,9 +18,9 @@ Use this file as mission control. Update checkboxes as tasks are completed.
 | Testing | 85% | +5% | 50/50 green; health test isolated; no submit e2e |
 | Documentation | 90% | +35% | `docs/` complete; README links valid |
 | Submission readiness | 55% | +10% | Code/docs ready; video + console proofs pending |
-| DevOps automation | 40% | — | Makefile targets exist; **`scripts/` folder missing** |
+| DevOps | 70% | +30% | Makefile covers install/run/test/lint; CI/Docker still pending |
 
-**Bottom line:** The product is demo-ready. The main risks before deadline are **unrecorded demo video**, **empty `docs/proof/`**, and **missing automation scripts** referenced by the Makefile.
+**Bottom line:** The product is demo-ready. The main risks before deadline are **unrecorded demo video** and completing **Alibaba Cloud console proof screenshots** for submission.
 
 ---
 
@@ -167,7 +167,7 @@ Use this file as mission control. Update checkboxes as tasks are completed.
 | MockLLM behavior documented | [✅] Complete | Explained in `docs/DEPLOYMENT.md` |
 
 ### Critical actions (Integrations)
-- [ ] Run `make capture-proofs` → populate `docs/proof/*.png` (folder currently **empty**)
+- [ ] Capture Alibaba Cloud console screenshots manually → `docs/proof/`
 - [ ] Verify live Qwen-VL call succeeds with production API key before recording demo
 - [ ] Confirm DashScope console shows API usage after a live claim submission
 
@@ -175,26 +175,21 @@ Use this file as mission control. Update checkboxes as tasks are completed.
 
 ## 7. 📦 Deployment & DevOps
 
-**Summary:** Makefile covers dev workflow. Automation script targets exist but **script files are missing from the repo**.
+**Summary:** Makefile covers the standard local workflow. Internal automation utilities were removed; they are not needed for submission.
 
 | Item | Status | Notes |
 |------|--------|-------|
 | Dockerfile | [❌] Not Started | — |
 | Environment variables template (`.env.example`) | [✅] Complete | Well commented |
 | Makefile with common commands | [✅] Complete | `install`, `lint`, `test`, `coverage`, `run`, `run-frontend`, `clean` |
-| Automation: `capture-proofs` | [❌] Broken | Makefile target exists; **`scripts/capture_alibaba_proofs.py` missing** |
-| Automation: `record-demo` | [❌] Broken | Makefile target exists; **`scripts/record_demo.py` missing** |
-| Playwright in dev dependencies | [✅] Complete | `playwright>=1.49.0` in `pyproject.toml` |
+| Internal automation utilities | [➖] Removed | Not needed for submission |
 | GitHub Actions CI/CD | [❌] Not Started | No `.github/workflows/` |
 | Requirements properly pinned | [⚠️] Partial | `pyproject.toml` uses `>=` ranges, not lock file |
-| Demo recording artifact | [⚠️] Partial | `docs/demo-logs.txt` exists; `docs/demo-recording.mp4` **missing**; partial WebM in `docs/.demo_video_temp/` |
+| Demo recording artifact | [❌] Not Started | Record manually for Devpost / YouTube |
 
 ### Critical actions (DevOps)
-- [ ] **Restore `scripts/capture_alibaba_proofs.py` and `scripts/record_demo.py`** (Makefile references them)
 - [ ] Add `.github/workflows/ci.yml` (lint + test on push)
 - [ ] Add `Dockerfile` + `docker-compose.yml` for one-command demo
-- [ ] Add `docs/.demo_video_temp/` to `.gitignore`
-- [ ] Re-run `make record-demo` with port 8501 free (last run failed: port in use)
 
 ---
 
@@ -207,7 +202,7 @@ Use this file as mission control. Update checkboxes as tasks are completed.
 | Public GitHub repository | [⚠️] Partial | Remote: `github.com/kaiquetheo-star/claimflow` — verify public access |
 | Open-source license (MIT) | [✅] Complete | `LICENSE` (MIT, 2026); `pyproject.toml` updated |
 | Architecture diagram uploaded | [✅] Complete | `docs/architecture.png` + Mermaid in `docs/architecture.md` |
-| Demo video recorded and on YouTube | [❌] Not Started | `docs/demo-recording.mp4` not produced |
+| Demo video recorded and on YouTube | [❌] Not Started | Record manually and publish to YouTube / Loom |
 | Blog post published (LinkedIn/Medium) | [❌] Not Started | — |
 | Devpost submission complete | [❌] Not Started | — |
 | Proof of Alibaba Cloud usage (code) | [✅] Complete | `alibaba_cloud_integration.py`, `/health`, `ALIBABA_CLOUD_PROOF.md` |
@@ -217,9 +212,9 @@ Use this file as mission control. Update checkboxes as tasks are completed.
 
 ### Critical actions (Submission) — **DO BEFORE DEADLINE**
 1. [x] Add `LICENSE` (MIT) and update `pyproject.toml` license field
-2. [ ] Restore automation scripts and run `make capture-proofs` → fill `docs/proof/`
-3. [ ] Record 3-minute demo video (`make record-demo` or manual) → `docs/demo-recording.mp4`
-4. [ ] Upload video to YouTube / Loom and add URL to Devpost
+2. [ ] Capture Alibaba Cloud console screenshots manually → fill `docs/proof/`
+3. [ ] Record 3-minute demo video manually and publish to YouTube / Loom
+4. [ ] Upload video URL to Devpost
 5. [ ] Complete Devpost with repo URL, video URL, and Alibaba Cloud proof links
 6. [ ] Push latest changes to `origin/main` and verify fresh clone works
 
@@ -234,8 +229,6 @@ Use this file as mission control. Update checkboxes as tasks are completed.
 | BUG-03 | Limitation | Streamlit HITL not persisted via review API | High | ✅ Fixed |
 | BUG-04 | Limitation | In-memory claim store when PostgreSQL not configured | Medium | Open |
 | BUG-05 | Limitation | MockLLM returns high-fraud when DashScope fails | Medium | Open (documented) |
-| BUG-06 | Bug | `make capture-proofs` / `make record-demo` fail — scripts missing | **Critical** | Open |
-| BUG-07 | Bug | `make record-demo` failed: port 8501 already in use | Medium | Open |
 | BUG-08 | Lint | `E501` line too long in `alibaba_cloud_integration.py:330` | Low | Open |
 | TODO-01 | Feature | Wire frontend decisions to review API | High | ✅ Done |
 | TODO-02 | Feature | Add `POST /claims/submit` integration test | High | Open |
@@ -244,11 +237,9 @@ Use this file as mission control. Update checkboxes as tasks are completed.
 | TODO-05 | Docs | Create `docs/architecture.md` | High | ✅ Done |
 | TODO-06 | DevOps | GitHub Actions CI workflow | Medium | Open |
 | TODO-07 | DevOps | Dockerfile for containerized deployment | Medium | Open |
-| TODO-08 | Submission | Record and publish demo video | **Critical** | Open |
 | TODO-09 | Submission | MIT license | **Critical** | ✅ Done |
 | TODO-10 | Config | Add `http://localhost:8501` to default CORS origins | Low | Open |
 | TODO-11 | Submission | Capture Alibaba console screenshots to `docs/proof/` | **Critical** | Open |
-| TODO-12 | DevOps | Restore `scripts/` automation folder | **Critical** | Open |
 
 ---
 
@@ -276,13 +267,6 @@ make lint-fix
 # Install dependencies
 make install
 
-# Alibaba console screenshots (⚠️ requires scripts/ to exist)
-make install-playwright
-make capture-proofs
-
-# Automated demo recording (⚠️ requires scripts/ to exist)
-make record-demo
-
 # API docs (backend must be running)
 open http://localhost:8000/api/v1/docs
 
@@ -299,7 +283,6 @@ curl http://localhost:8000/api/v1/health | jq
 
 | Priority | Task | Est. Time | Status |
 |----------|------|-----------|--------|
-| 🔴 P0 | Restore `scripts/` and run `make capture-proofs` | 30 min | [ ] |
 | 🔴 P0 | Record demo video → upload to YouTube | 1–2 h | [ ] |
 | 🔴 P0 | Push all changes to public GitHub | 15 min | [ ] |
 | 🔴 P0 | Complete Devpost submission | 45 min | [ ] |
@@ -322,7 +305,6 @@ curl http://localhost:8000/api/v1/health | jq
 | `docs/` | Empty / missing | **architecture, DEPLOYMENT, ALIBABA_CLOUD_PROOF, screenshots** |
 | LICENSE | Missing | **MIT added** |
 | README | Broken screenshot link | **All doc links valid** |
-| Automation | Not planned | Makefile targets added; **scripts not in repo** |
 | Console proof | Not captured | `docs/proof/` created but **empty** |
 
 ---

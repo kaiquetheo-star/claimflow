@@ -1,7 +1,9 @@
 """File upload endpoints backed by the storage strategy pattern."""
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
+from claimflow.api.dependencies import require_api_key
+from claimflow.api.file_validation import FileValidationError, validate_upload
 from claimflow.core.logging import get_logger
 from claimflow.tools.factory import get_storage_client
 
@@ -13,32 +15,28 @@ logger = get_logger(__name__)
     "",
     status_code=status.HTTP_201_CREATED,
     summary="Upload a claim document",
+    dependencies=[Depends(require_api_key)],
 )
 async def upload_file(
-    file: UploadFile = File(..., description="Document to store (PDF, image, etc.)."),
+    file: UploadFile = File(
+        ...,
+        description="Image to store (.jpg, .jpeg, .png, .webp, .gif; max 10 MB).",
+    ),
 ) -> dict[str, str]:
-    """Accept a multipart file upload and persist it via the active storage backend."""
-    if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Filename is required.",
-        )
-
-    file_bytes = await file.read()
-    if not file_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file is empty.",
-        )
+    """Accept a multipart image upload and persist it via the active storage backend."""
+    try:
+        validated = await validate_upload(file)
+    except FileValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     storage = get_storage_client()
 
     try:
-        url = await storage.upload_file(file_bytes, file.filename)
+        url = await storage.upload_file(validated.data, validated.filename)
     except NotImplementedError as exc:
         logger.error(
             "Storage backend not available",
-            extra={"filename": file.filename, "error": str(exc)},
+            extra={"filename": validated.filename, "error": str(exc)},
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -47,11 +45,16 @@ async def upload_file(
 
     logger.info(
         "Upload completed",
-        extra={"filename": file.filename, "url": url, "size_bytes": len(file_bytes)},
+        extra={
+            "filename": validated.filename,
+            "url": url,
+            "size_bytes": len(validated.data),
+            "content_type": validated.content_type,
+        },
     )
 
     return {
-        "filename": file.filename,
+        "filename": validated.filename,
         "url": url,
-        "content_type": file.content_type or "application/octet-stream",
+        "content_type": validated.content_type,
     }

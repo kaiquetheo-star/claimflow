@@ -51,6 +51,19 @@ class LocalStorage(BaseStorage):
         safe_name = self._safe_filename(filename)
         return f"{self._base_url}/uploads/{safe_name}"
 
+    async def download_file(self, filename: str) -> bytes:
+        path = self.resolve_local_path(filename)
+        if not path.is_file():
+            raise FileNotFoundError(f"Local storage file not found: {path}")
+        return await asyncio.to_thread(path.read_bytes)
+
     def resolve_local_path(self, filename: str) -> Path:
         """Return the absolute local filesystem path for a stored filename."""
         return (self._upload_dir / self._safe_filename(filename)).resolve()
+
+    async def materialize_local_path(self, filename: str) -> tuple[str, bool]:
+        """Return the existing local path without copying to a temp file."""
+        path = self.resolve_local_path(filename)
+        if not path.is_file():
+            raise FileNotFoundError(f"Local storage file not found: {path}")
+        return str(path), False

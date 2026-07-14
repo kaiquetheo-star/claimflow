@@ -28,6 +28,11 @@ class ClaimAgentState(TypedDict, total=False):
         status: Current processing status of the claim.
         error: Error message when triage or risk assessment fails.
         error_message: Structured error detail for API consumers (mirrors ``error`` on failure).
+        awaiting_human_decision: True when LangGraph paused via ``interrupt_before``.
+        graph_interrupted: True while a checkpointed interrupt is pending resume.
+        human_decision: Adjuster decision string (``APPROVED`` / ``REJECTED``) applied on resume.
+        reviewer_note: Optional note from the human adjuster.
+        analyst_id: Identifier of the adjuster who resumed the graph.
     """
 
     claim_id: str
@@ -47,3 +52,8 @@ class ClaimAgentState(TypedDict, total=False):
     status: ClaimStatus
     error: str
     error_message: str
+    awaiting_human_decision: bool
+    graph_interrupted: bool
+    human_decision: str | None
+    reviewer_note: str | None
+    analyst_id: str | None

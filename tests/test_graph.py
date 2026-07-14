@@ -11,6 +11,7 @@ from claimflow.agents.graph import (
     _compute_fail_closed_penalties,
     _mentions_weather_climate,
     _resolve_status,
+    _weather_verification_unavailable,
     investigation_node,
     risk_assessment_node,
     route_after_investigation,
@@ -341,6 +342,63 @@ def test_compute_fail_closed_penalties() -> None:
     )
     assert bonus == pytest.approx(0.5)
     assert len(penalties) == 2
+
+
+def test_weather_verification_unavailable_treats_error_dict_as_missing() -> None:
+    assert _weather_verification_unavailable(None) is True
+    assert _weather_verification_unavailable({}) is True
+    assert _weather_verification_unavailable({"error": "geocoding_failed"}) is True
+    assert _weather_verification_unavailable({"had_heavy_rain": True, "summary": "ok"}) is False
+
+
+def test_compute_fail_closed_penalties_weather_error_dict() -> None:
+    """Open-Meteo soft-error payloads must still trigger the +0.2 weather penalty."""
+    bonus, penalties = _compute_fail_closed_penalties(
+        {
+            **_base_state(),
+            "raw_input": "Tempestade com chuva forte em São Paulo",
+            "weather_verification": {
+                "error": "open_meteo_unavailable",
+                "message": "Connection refused",
+            },
+        }
+    )
+    assert bonus == pytest.approx(0.2)
+    assert any("Weather mentioned but verification unavailable" in p for p in penalties)
+
+
+@pytest.mark.asyncio
+async def test_risk_assessment_node_penalizes_weather_error_dict() -> None:
+    state = {
+        **_base_state(),
+        "raw_input": "Tempestade com chuva forte em São Paulo ontem.",
+        "extracted_data": {
+            "cliente_nome": "João",
+            "tipo_dano": "AGUA",
+            "localizacao": "São Paulo",
+            "descricao_resumida": "Alagamento por chuva.",
+        },
+        "weather_verification": {"error": "timeout", "message": "Open-Meteo timed out"},
+    }
+    risk_result = RiskAssessmentResult(
+        fraud_risk_score=0.1,
+        severity_score=0.2,
+        justificativa_risco="Relato coerente.",
+        requires_human_review=False,
+    )
+
+    with patch(
+        "claimflow.agents.graph.ainvoke_llm_with_fallback",
+        new_callable=AsyncMock,
+        return_value=(risk_result, "qwen-plus"),
+    ):
+        result = await risk_assessment_node(state)
+
+    assert result["fraud_risk_score"] == pytest.approx(0.3)
+    assert result["requires_human_review"] is True
+    assert "Weather mentioned but verification unavailable" in str(
+        result["risk_assessment"]["fail_closed_penalties"]
+    )
 
 
 @pytest.mark.asyncio

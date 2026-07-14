@@ -131,6 +131,13 @@ class Settings(BaseSettings):
     )
 
     # --- Application ---
+    api_key: SecretStr = Field(
+        default=SecretStr("cf_hk_a8f3b2c19e4d5f60718293a4b5c6d7e8"),
+        description=(
+            "Shared API key required via X-API-Key header on mutating endpoints "
+            "(claims submit, uploads, review decisions). Rotate for production."
+        ),
+    )
     api_v1_str: str = Field(
         default="/api/v1",
         description="URL prefix for versioned API routes.",

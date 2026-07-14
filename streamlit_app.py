@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime
@@ -18,6 +19,18 @@ SUBMIT_URL = f"{API_BASE_URL}/claims/submit"
 HEALTH_URL = f"{API_BASE_URL}/health"
 DECISION_URL_TEMPLATE = f"{API_BASE_URL}/review/{{claim_id}}/decision"
 ANALYST_ID = "demo-analyst"
+# Prefer CLAIMFLOW_API_KEY; fall back to API_KEY (same as backend Settings).
+API_KEY = (
+    os.getenv("CLAIMFLOW_API_KEY")
+    or os.getenv("API_KEY")
+    or "cf_hk_a8f3b2c19e4d5f60718293a4b5c6d7e8"
+)
+
+
+def _api_headers() -> dict[str, str]:
+    """Headers for authenticated mutating API calls."""
+    return {"X-API-Key": API_KEY}
+
 ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png"}
 FRAUD_HIGH_RISK_THRESHOLD = 0.7
 
@@ -448,7 +461,13 @@ def _submit_claim_worker(
             content_type = image_content_type or "image/jpeg"
             files = {"image": (image_filename, image_bytes, content_type)}
 
-        response = requests.post(SUBMIT_URL, data=data, files=files, timeout=300)
+        response = requests.post(
+            SUBMIT_URL,
+            data=data,
+            files=files,
+            headers=_api_headers(),
+            timeout=300,
+        )
 
         if response.status_code >= 400:
             if response.content:
@@ -491,7 +510,7 @@ def submit_review_decision_api(
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=15)
+        response = requests.post(url, json=payload, headers=_api_headers(), timeout=15)
     except requests.ConnectionError:
         return False, "⚠️ Backend not reachable. Please run 'make run' first."
     except requests.Timeout:
@@ -514,9 +533,19 @@ def _human_review_status_label(result: dict[str, Any], human_decision: str | Non
     if human_decision:
         return human_decision
     agent_status = str(result.get("status", "PENDING")).upper()
-    if agent_status == "HUMAN_REVIEW":
+    if agent_status == "HUMAN_REVIEW" or result.get("awaiting_human_decision"):
         return "PENDING REVIEW"
     return agent_status
+
+
+def _is_awaiting_human_decision(result: dict[str, Any], detail: dict[str, Any] | None) -> bool:
+    """True when LangGraph is paused at interrupt_before=['human_review']."""
+    if result.get("awaiting_human_decision") or result.get("graph_interrupted"):
+        return True
+    payload = (detail or {}).get("payload") or {}
+    if payload.get("awaiting_human_decision") or payload.get("graph_interrupted"):
+        return True
+    return str(result.get("status", "")).upper() == "HUMAN_REVIEW"
 
 
 def _render_decision_receipt(receipt: dict[str, Any]) -> None:
@@ -841,8 +870,14 @@ def _record_decision(claim_id: str, decision: str, notes: str) -> bool:
 
     if st.session_state.claim_result:
         st.session_state.claim_result["status"] = receipt["decision"]
+        st.session_state.claim_result["awaiting_human_decision"] = False
+        st.session_state.claim_result["graph_interrupted"] = False
     if st.session_state.claim_detail:
         st.session_state.claim_detail["status"] = receipt["decision"]
+        payload = st.session_state.claim_detail.get("payload")
+        if isinstance(payload, dict):
+            payload["awaiting_human_decision"] = False
+            payload["graph_interrupted"] = False
 
     logger.info("Human analyst decision recorded via API", extra=entry)
     st.toast("Decision recorded successfully", icon="✅")
@@ -865,6 +900,7 @@ def _render_human_actions(result: dict[str, Any]) -> None:
     claim_id = result.get("claim_id", st.session_state.claim_id)
     decision_made = bool(st.session_state.human_decision or st.session_state.decision_receipt)
     status_label = _human_review_status_label(result, st.session_state.human_decision)
+    awaiting = _is_awaiting_human_decision(result, st.session_state.claim_detail)
 
     st.markdown(
         '<div class="cf-card"><div class="cf-card-title">🛡️ Human-in-the-Loop Decision</div>',
@@ -881,16 +917,31 @@ def _render_human_actions(result: dict[str, Any]) -> None:
     }.get(status_label, "blue")
     st.markdown(f"**Current status:** :{status_color}[{status_label}]")
 
+    if awaiting and not decision_made:
+        st.warning(
+            "⏳ **Waiting for human decision…**\n\n"
+            "LangGraph is **paused** at `interrupt_before=['human_review']`. "
+            "Submitting Approve/Reject calls `update_state` + resume on the API."
+        )
+
     if st.session_state.decision_error and not decision_made:
         st.error(st.session_state.decision_error)
 
     if decision_made:
-        st.info("✅ Decision already recorded. Buttons are disabled for this claim.")
+        st.info("✅ Decision already recorded. LangGraph resumed and buttons are disabled.")
         if st.session_state.decision_receipt:
             _render_decision_receipt(st.session_state.decision_receipt)
         if st.button("🔄 Reset for Demo", use_container_width=True, key="reset_demo_decision"):
             _reset_demo_decision_state()
             st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    if not awaiting and not decision_made:
+        st.caption(
+            "This claim finished automatically (approval/rejection). "
+            "HITL controls appear when the graph pauses for review."
+        )
         st.markdown("</div>", unsafe_allow_html=True)
         return
 

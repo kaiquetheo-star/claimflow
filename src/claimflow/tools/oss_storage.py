@@ -102,3 +102,45 @@ class OSSStorage(BaseStorage):
         if not result.url:
             raise OSSStorageError("OSS presign returned an empty URL")
         return result.url
+
+    async def download_file(self, filename: str) -> bytes:
+        """Download object bytes from OSS for local vision analysis."""
+        key = self._object_key(filename)
+        request = oss.models.GetObjectRequest(
+            bucket=self._settings.oss_bucket_name,
+            key=key,
+        )
+
+        try:
+            result = await asyncio.to_thread(self._client.get_object, request)
+        except Exception as exc:
+            logger.error("OSS download failed", extra={"key": key, "error": str(exc)})
+            raise OSSStorageError(f"OSS download failed: {exc}") from exc
+
+        body = getattr(result, "body", None)
+        if body is None:
+            raise OSSStorageError(f"OSS download returned empty body for key={key}")
+
+        try:
+            if hasattr(body, "read"):
+                data = await asyncio.to_thread(body.read)
+            elif isinstance(body, bytes | bytearray):
+                data = bytes(body)
+            else:
+                data = bytes(body)
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 — best-effort stream cleanup
+                    pass
+
+        if not data:
+            raise OSSStorageError(f"OSS download returned empty content for key={key}")
+
+        logger.info(
+            "File downloaded from OSS for local analysis",
+            extra={"key": key, "size_bytes": len(data)},
+        )
+        return data

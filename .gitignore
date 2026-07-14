@@ -82,3 +82,8 @@ logs/
 uploads/
 tmp/
 *.sqlite3
+
+# Demo recording artifacts (may be created manually)
+docs/.demo_video_temp/
+docs/demo-logs.txt
+docs/demo-recording.mp4

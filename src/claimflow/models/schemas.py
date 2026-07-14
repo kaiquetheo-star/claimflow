@@ -108,6 +108,17 @@ class ClaimResponse(BaseModel):
         default=False,
         description="Whether manual review was flagged by the risk LLM.",
     )
+    awaiting_human_decision: bool = Field(
+        default=False,
+        description=(
+            "True when LangGraph is paused at interrupt_before=['human_review'] "
+            "waiting for an adjuster decision."
+        ),
+    )
+    graph_interrupted: bool = Field(
+        default=False,
+        description="True when a checkpointed LangGraph interrupt is pending resume.",
+    )
     error: str | None = Field(
         default=None,
         description="Error message when a pipeline node fails gracefully.",

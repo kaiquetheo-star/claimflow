@@ -6,31 +6,47 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from langgraph.graph.state import CompiledStateGraph
 
+from claimflow.agents.graph import is_awaiting_human_review, thread_config
 from claimflow.agents.states import ClaimStatus
-from claimflow.api.dependencies import get_claim_graph, get_claim_store
+from claimflow.api.dependencies import get_claim_graph, get_claim_store, require_api_key
+from claimflow.api.file_validation import FileValidationError, validate_upload
 from claimflow.core.logging import get_logger
 from claimflow.models.schemas import ClaimResponse, ClaimSubmissionRequest
 from claimflow.services.claim_store import ClaimStore
 from claimflow.tools.factory import get_storage_client
-from claimflow.tools.local_storage import LocalStorage
+from claimflow.tools.storage_interface import BaseStorage
 
 router = APIRouter(prefix="/claims", tags=["claims"])
 logger = get_logger(__name__)
 
-ALLOWED_IMAGE_CONTENT_TYPES: frozenset[str] = frozenset(
-    {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
-)
+
+async def _resolve_image_path(filename: str, storage: BaseStorage) -> tuple[str, bool]:
+    """Materialise a local path for Qwen-VL (download from OSS when needed).
+
+    Returns:
+        ``(local_path, is_temporary)``. Temporary files are deleted after the
+        graph finishes processing the claim.
+    """
+    return await storage.materialize_local_path(filename)
 
 
-async def _resolve_image_path(filename: str, storage: object) -> str:
-    """Return a local filesystem path suitable for Qwen-VL analysis."""
-    if isinstance(storage, LocalStorage):
-        return str(storage.resolve_local_path(filename))
-    return filename
+def _cleanup_temp_image(path: str | None, *, is_temporary: bool) -> None:
+    """Best-effort removal of a temp image downloaded from remote storage."""
+    if not path or not is_temporary:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "Failed to delete temporary vision image",
+            extra={"path": path, "error": str(exc)},
+        )
 
 
 def _build_claim_response(result: dict[str, Any]) -> ClaimResponse:
     error = result.get("error") or None
+    awaiting = bool(result.get("awaiting_human_decision"))
+    interrupted = bool(result.get("graph_interrupted"))
     return ClaimResponse(
         claim_id=result["claim_id"],
         status=result["status"],
@@ -41,7 +57,9 @@ def _build_claim_response(result: dict[str, Any]) -> ClaimResponse:
         severity_score=result.get("severity_score", 0.0),
         risk_score=result.get("risk_score", 0.0),
         risk_assessment=result.get("risk_assessment") or {},
-        requires_human_review=result.get("requires_human_review", False),
+        requires_human_review=result.get("requires_human_review", False) or awaiting,
+        awaiting_human_decision=awaiting,
+        graph_interrupted=interrupted,
         error=error if error else None,
     )
 
@@ -51,6 +69,7 @@ def _build_claim_response(result: dict[str, Any]) -> ClaimResponse:
     response_model=ClaimResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Submit a claim for autonomous processing via LangGraph",
+    dependencies=[Depends(require_api_key)],
 )
 async def submit_claim(
     request: Request,
@@ -73,25 +92,28 @@ async def submit_claim(
     log.info("Claim submission received", extra={"endpoint": "/claims/submit"})
 
     image_path: str | None = None
+    image_is_temporary = False
 
     if image is not None and image.filename:
-        if image.content_type and image.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unsupported image content type: {image.content_type}",
-            )
-
-        file_bytes = await image.read()
-        if not file_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded image is empty.",
-            )
+        try:
+            validated = await validate_upload(image)
+        except FileValidationError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
         storage = get_storage_client()
-        stored_name = f"{submission.claim_id}_{Path(image.filename).name}"
-        await storage.upload_file(file_bytes, stored_name)
-        image_path = await _resolve_image_path(stored_name, storage)
+        stored_name = f"{submission.claim_id}_{validated.filename}"
+        try:
+            await storage.upload_file(validated.data, stored_name)
+            image_path, image_is_temporary = await _resolve_image_path(stored_name, storage)
+        except Exception as exc:
+            log.error(
+                "Claim image storage/materialisation failed",
+                extra={"claim_id": submission.claim_id, "error": str(exc)},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to store or prepare claim image for analysis.",
+            ) from exc
 
         log.info(
             "Claim image stored",
@@ -99,7 +121,8 @@ async def submit_claim(
                 "claim_id": submission.claim_id,
                 "filename": stored_name,
                 "image_path": image_path,
-                "size_bytes": len(file_bytes),
+                "image_is_temporary": image_is_temporary,
+                "size_bytes": len(validated.data),
             },
         )
 
@@ -121,36 +144,59 @@ async def submit_claim(
         "status": ClaimStatus.PENDING,
         "error": "",
         "error_message": "",
+        "awaiting_human_decision": False,
+        "graph_interrupted": False,
+        "human_decision": None,
+        "reviewer_note": None,
+        "analyst_id": None,
     }
-    run_config = {"configurable": {"thread_id": submission.claim_id}}
+    run_config = thread_config(submission.claim_id)
 
     try:
-        result = await graph.ainvoke(initial_state, config=run_config)
-    except Exception as exc:
-        log.error(
-            "Claim graph invocation failed",
-            extra={"claim_id": submission.claim_id, "error": str(exc)},
+        try:
+            result = dict(await graph.ainvoke(initial_state, config=run_config))
+        except Exception as exc:
+            log.error(
+                "Claim graph invocation failed",
+                extra={"claim_id": submission.claim_id, "error": str(exc)},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Claim processing failed.",
+            ) from exc
+
+        interrupted = await is_awaiting_human_review(graph, submission.claim_id)
+        if interrupted:
+            result["status"] = ClaimStatus.HUMAN_REVIEW
+            result["awaiting_human_decision"] = True
+            result["graph_interrupted"] = True
+            result["requires_human_review"] = True
+            log.info(
+                "LangGraph paused before human_review (interrupt_before)",
+                extra={"claim_id": submission.claim_id, "next_node": "human_review"},
+            )
+
+        await claim_store.save_result(
+            claim_id=submission.claim_id,
+            status=result["status"],
+            payload=dict(result),
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Claim processing failed.",
-        ) from exc
 
-    await claim_store.save_result(
-        claim_id=submission.claim_id,
-        status=result["status"],
-        payload=dict(result),
-    )
+        log.info(
+            "Claim processing completed",
+            extra={
+                "claim_id": submission.claim_id,
+                "final_status": result.get("status"),
+                "awaiting_human_decision": result.get("awaiting_human_decision", False),
+                "graph_interrupted": result.get("graph_interrupted", False),
+                "risk_score": result.get("risk_score", 0.0),
+                "consistency_score": result.get("consistency_score"),
+                "checkpoint_backend": getattr(
+                    request.app.state, "checkpoint_backend", "unknown"
+                ),
+            },
+        )
 
-    log.info(
-        "Claim processing completed",
-        extra={
-            "claim_id": submission.claim_id,
-            "final_status": result.get("status"),
-            "risk_score": result.get("risk_score", 0.0),
-            "consistency_score": result.get("consistency_score"),
-            "checkpoint_backend": getattr(request.app.state, "checkpoint_backend", "unknown"),
-        },
-    )
-
-    return _build_claim_response(result)
+        return _build_claim_response(result)
+    finally:
+        _cleanup_temp_image(image_path, is_temporary=image_is_temporary)

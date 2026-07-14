@@ -3,9 +3,11 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from langgraph.graph.state import CompiledStateGraph
 
+from claimflow.agents.graph import is_awaiting_human_review, resume_with_human_decision
 from claimflow.agents.states import ClaimStatus
-from claimflow.api.dependencies import get_claim_store
+from claimflow.api.dependencies import get_claim_graph, get_claim_store, require_api_key
 from claimflow.core.logging import get_logger
 from claimflow.models.schemas import (
     ReviewDecisionRequest,
@@ -19,13 +21,8 @@ from claimflow.services.claim_store import ClaimStore
 router = APIRouter(prefix="/review", tags=["human-review"])
 logger = get_logger(__name__)
 
-_DECIDABLE_STATUSES: frozenset[ClaimStatus] = frozenset(
-    {
-        ClaimStatus.HUMAN_REVIEW,
-        ClaimStatus.APPROVED,
-        ClaimStatus.REJECTED,
-    }
-)
+# Only claims paused for adjuster review can receive a decision / graph resume.
+_DECIDABLE_STATUSES: frozenset[ClaimStatus] = frozenset({ClaimStatus.HUMAN_REVIEW})
 
 
 def _queue_item_from_snapshot(snapshot) -> ReviewQueueItem:
@@ -41,6 +38,15 @@ def _queue_item_from_snapshot(snapshot) -> ReviewQueueItem:
         tipo_dano=extracted.get("tipo_dano"),
         updated_at=snapshot.updated_at,
     )
+
+
+def _has_recorded_decision(payload: dict) -> bool:
+    decision = payload.get("human_decision")
+    if isinstance(decision, dict) and decision.get("decision"):
+        return True
+    if isinstance(decision, str) and decision.strip():
+        return True
+    return False
 
 
 @router.get(
@@ -75,16 +81,23 @@ async def list_review_queue(
 async def get_review_detail(
     claim_id: str,
     claim_store: ClaimStore = Depends(get_claim_store),
+    graph: CompiledStateGraph = Depends(get_claim_graph),
 ) -> ReviewDetailResponse:
-    """Return the persisted claim snapshot including triage and vision analysis."""
+    """Return the persisted claim snapshot including interrupt / resume flags."""
     snapshot = await claim_store.get(claim_id)
     if snapshot is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found.")
 
+    payload = dict(snapshot.payload)
+    paused = await is_awaiting_human_review(graph, claim_id)
+    if paused:
+        payload["awaiting_human_decision"] = True
+        payload["graph_interrupted"] = True
+
     return ReviewDetailResponse(
         claim_id=snapshot.claim_id,
         status=snapshot.status,
-        payload=snapshot.payload,
+        payload=payload,
         reviewer_note=snapshot.reviewer_note,
         created_at=snapshot.created_at,
         updated_at=snapshot.updated_at,
@@ -94,14 +107,23 @@ async def get_review_detail(
 @router.post(
     "/{claim_id}/decision",
     response_model=ReviewDecisionResponse,
-    summary="Record an adjuster approve/reject decision",
+    summary="Record an adjuster approve/reject decision and resume LangGraph",
+    dependencies=[Depends(require_api_key)],
 )
 async def submit_review_decision(
     claim_id: str,
     body: ReviewDecisionRequest,
     claim_store: ClaimStore = Depends(get_claim_store),
+    graph: CompiledStateGraph = Depends(get_claim_graph),
 ) -> ReviewDecisionResponse:
-    """Apply a human decision to a processed claim."""
+    """Apply a human decision: resume the interrupted graph when a checkpoint exists.
+
+    Flow:
+      1. Validate claim is in ``HUMAN_REVIEW`` and has no prior decision.
+      2. If LangGraph is paused at ``interrupt_before=['human_review']``, call
+         ``aupdate_state`` + ``ainvoke`` to resume.
+      3. Persist the final decision on the claim store (fallback if checkpoint lost).
+    """
     snapshot = await claim_store.get(claim_id)
     if snapshot is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found.")
@@ -112,7 +134,7 @@ async def submit_review_decision(
             detail=f"Claim cannot be decided in status {snapshot.status}.",
         )
 
-    if snapshot.payload.get("human_decision"):
+    if _has_recorded_decision(snapshot.payload):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Decision already recorded for this claim.",
@@ -120,6 +142,36 @@ async def submit_review_decision(
 
     new_status = ClaimStatus(body.decision)
     decided_at = datetime.now(UTC)
+    graph_resumed = False
+
+    if await is_awaiting_human_review(graph, claim_id):
+        try:
+            graph_result = await resume_with_human_decision(
+                graph,
+                claim_id,
+                decision=new_status,
+                reviewer_note=body.reviewer_note,
+                analyst_id=body.analyst_id,
+            )
+            graph_resumed = True
+            # Keep store in sync with final graph values + analyst metadata.
+            await claim_store.save_result(
+                claim_id,
+                ClaimStatus(graph_result.get("status", new_status)),
+                {
+                    **snapshot.payload,
+                    **graph_result,
+                    "awaiting_human_decision": False,
+                    "graph_interrupted": False,
+                    "graph_resumed": True,
+                },
+            )
+        except ValueError as exc:
+            logger.warning(
+                "LangGraph resume unavailable; falling back to claim-store decision",
+                extra={"claim_id": claim_id, "error": str(exc)},
+            )
+
     updated = await claim_store.apply_decision(
         claim_id,
         new_status,
@@ -137,6 +189,7 @@ async def submit_review_decision(
             "analyst_id": body.analyst_id,
             "reviewer_note": body.reviewer_note,
             "decided_at": decided_at.isoformat(),
+            "graph_resumed": graph_resumed,
         },
     )
 

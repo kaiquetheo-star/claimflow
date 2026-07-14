@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from claimflow.agents.graph import build_claim_graph
+from langgraph.checkpoint.memory import InMemorySaver
+
+from claimflow.agents.graph import build_claim_graph, is_awaiting_human_review, thread_config
 from claimflow.agents.states import ClaimStatus
 from claimflow.models.agent_schemas import RiskAssessmentResult, ToolDecision, TriageResult
 from claimflow.services.llm_service import MOCK_MODEL_NAME, MockLLM, ainvoke_llm_with_fallback
@@ -142,11 +144,15 @@ async def test_full_graph_with_mock_llm_routes_human_review(tmp_path) -> None:
             side_effect=Exception("403 AccessDenied.Unpurchased"),
         ),
     ):
-        graph = build_claim_graph()
-        result = await graph.ainvoke(initial_state)
+        graph = build_claim_graph(checkpointer=InMemorySaver())
+        result = await graph.ainvoke(
+            initial_state,
+            config=thread_config(initial_state["claim_id"]),
+        )
 
     assert result["status"] == ClaimStatus.HUMAN_REVIEW
     assert result["fraud_risk_score"] >= 0.85
     assert result.get("system_error") is not True
     assert result["extracted_data"]["tipo_dano"] == "FOGO"
     assert result["image_analysis"]["detected_damage_type"] == "AGUA"
+    assert await is_awaiting_human_review(graph, initial_state["claim_id"]) is True

@@ -107,6 +107,15 @@ def _mentions_weather_climate(text: str) -> bool:
     return any(keyword in lowered for keyword in _WEATHER_KEYWORDS)
 
 
+def _weather_verification_unavailable(weather_verification: object | None) -> bool:
+    """Return True when weather evidence is missing or an Open-Meteo error dict."""
+    if not weather_verification:
+        return True
+    if isinstance(weather_verification, dict) and weather_verification.get("error"):
+        return True
+    return False
+
+
 def _compute_fail_closed_penalties(state: ClaimAgentState) -> tuple[float, list[str]]:
     """Apply additive fraud penalties when expected evidence is missing."""
     penalties: list[str] = []
@@ -117,7 +126,9 @@ def _compute_fail_closed_penalties(state: ClaimAgentState) -> tuple[float, list[
         penalties.append("Image provided but visual analysis unavailable (+0.3)")
 
     raw_input = state.get("raw_input", "")
-    if _mentions_weather_climate(raw_input) and not state.get("weather_verification"):
+    if _mentions_weather_climate(raw_input) and _weather_verification_unavailable(
+        state.get("weather_verification")
+    ):
         bonus += MISSING_WEATHER_VERIFICATION_PENALTY
         penalties.append("Weather mentioned but verification unavailable (+0.2)")
 
@@ -577,10 +588,41 @@ async def risk_assessment_node(state: ClaimAgentState) -> ClaimAgentState:
 
 
 async def human_review_node(state: ClaimAgentState) -> ClaimAgentState:
-    """Confirm human-review routing and log for the operations queue."""
+    """Apply a human decision after LangGraph resumes past ``interrupt_before``.
+
+    The graph pauses *before* this node. The review API writes ``human_decision``
+    via ``update_state`` and then resumes; this node finalises the claim status.
+    """
     claim_id = state["claim_id"]
+    raw_decision = state.get("human_decision")
+    decision_value = None
+    if isinstance(raw_decision, str):
+        decision_value = raw_decision.strip().upper()
+    elif isinstance(raw_decision, ClaimStatus):
+        decision_value = raw_decision.value
+
+    if decision_value in {ClaimStatus.APPROVED.value, ClaimStatus.REJECTED.value}:
+        final_status = ClaimStatus(decision_value)
+        logger.info(
+            "Human decision applied after LangGraph resume",
+            extra={
+                "claim_id": claim_id,
+                "node": "human_review",
+                "status": final_status,
+                "analyst_id": state.get("analyst_id"),
+                "system_error": state.get("system_error", False),
+            },
+        )
+        return {
+            **state,
+            "status": final_status,
+            "awaiting_human_decision": False,
+            "graph_interrupted": False,
+            "requires_human_review": False,
+        }
+
     logger.info(
-        "Claim queued for human review",
+        "Claim still awaiting human decision at human_review node",
         extra={
             "claim_id": claim_id,
             "node": "human_review",
@@ -588,7 +630,12 @@ async def human_review_node(state: ClaimAgentState) -> ClaimAgentState:
             "system_error": state.get("system_error", False),
         },
     )
-    return {**state, "status": ClaimStatus.HUMAN_REVIEW}
+    return {
+        **state,
+        "status": ClaimStatus.HUMAN_REVIEW,
+        "awaiting_human_decision": True,
+        "graph_interrupted": True,
+    }
 
 
 async def approval_node(state: ClaimAgentState) -> ClaimAgentState:
@@ -633,6 +680,73 @@ def route_after_risk_assessment(
     return "approval"
 
 
+HUMAN_REVIEW_NODE = "human_review"
+
+
+def thread_config(claim_id: str) -> dict[str, dict[str, str]]:
+    """Build the LangGraph runnable config keyed by ``claim_id`` as ``thread_id``."""
+    return {"configurable": {"thread_id": claim_id}}
+
+
+async def is_awaiting_human_review(
+    graph: CompiledStateGraph,
+    claim_id: str,
+) -> bool:
+    """Return True when the checkpoint is paused before ``human_review``."""
+    try:
+        snapshot = await graph.aget_state(thread_config(claim_id))
+    except Exception:  # noqa: BLE001 — missing thread / checkpointer
+        return False
+    next_nodes = snapshot.next or ()
+    return HUMAN_REVIEW_NODE in next_nodes
+
+
+async def resume_with_human_decision(
+    graph: CompiledStateGraph,
+    claim_id: str,
+    *,
+    decision: ClaimStatus,
+    reviewer_note: str | None = None,
+    analyst_id: str | None = None,
+) -> dict:
+    """Update checkpoint state with the adjuster decision and resume the graph.
+
+    Raises:
+        ValueError: If the graph is not paused before ``human_review``.
+    """
+    if decision not in {ClaimStatus.APPROVED, ClaimStatus.REJECTED}:
+        raise ValueError(f"Unsupported human decision: {decision}")
+
+    config = thread_config(claim_id)
+    if not await is_awaiting_human_review(graph, claim_id):
+        raise ValueError(
+            f"Claim {claim_id} is not paused at {HUMAN_REVIEW_NODE}; cannot resume."
+        )
+
+    await graph.aupdate_state(
+        config,
+        {
+            "human_decision": decision.value,
+            "reviewer_note": reviewer_note,
+            "analyst_id": analyst_id,
+            "awaiting_human_decision": False,
+            "graph_interrupted": False,
+            "status": decision,
+        },
+    )
+    result = await graph.ainvoke(None, config=config)
+    logger.info(
+        "LangGraph resumed after human decision",
+        extra={
+            "claim_id": claim_id,
+            "decision": decision.value,
+            "final_status": result.get("status"),
+            "analyst_id": analyst_id,
+        },
+    )
+    return dict(result)
+
+
 def build_claim_graph(
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
@@ -641,13 +755,16 @@ def build_claim_graph(
     Pipeline:
       START → triage → investigation → risk_assessment
             → [human_review | approval | rejected] → END
+
+    ``human_review`` uses ``interrupt_before`` so the graph *pauses* and waits
+    for ``resume_with_human_decision`` (review API) before completing.
     """
     graph = StateGraph(ClaimAgentState)
 
     graph.add_node("triage", _wrap_safe_node("triage", triage_node))
     graph.add_node("investigation", _wrap_safe_node("investigation", investigation_node))
     graph.add_node("risk_assessment", _wrap_safe_node("risk_assessment", risk_assessment_node))
-    graph.add_node("human_review", _wrap_safe_node("human_review", human_review_node))
+    graph.add_node(HUMAN_REVIEW_NODE, _wrap_safe_node(HUMAN_REVIEW_NODE, human_review_node))
     graph.add_node("approval", _wrap_safe_node("approval", approval_node))
     graph.add_node("rejected", _wrap_safe_node("rejected", rejected_node))
 
@@ -658,20 +775,23 @@ def build_claim_graph(
         route_after_investigation,
         {
             "risk_assessment": "risk_assessment",
-            "human_review": "human_review",
+            "human_review": HUMAN_REVIEW_NODE,
         },
     )
     graph.add_conditional_edges(
         "risk_assessment",
         route_after_risk_assessment,
         {
-            "human_review": "human_review",
+            "human_review": HUMAN_REVIEW_NODE,
             "approval": "approval",
             "rejected": "rejected",
         },
     )
-    graph.add_edge("human_review", END)
+    graph.add_edge(HUMAN_REVIEW_NODE, END)
     graph.add_edge("approval", END)
     graph.add_edge("rejected", END)
 
-    return graph.compile(checkpointer=checkpointer)
+    return graph.compile(
+        checkpointer=checkpointer,
+        interrupt_before=[HUMAN_REVIEW_NODE],
+    )

@@ -26,6 +26,8 @@ Claimflow ingests raw claim submissions (e.g. email text), extracts structured d
 
 📐 **Full architecture documentation:** [docs/architecture.md](docs/architecture.md) — includes the Mermaid diagram (4 layers: Frontend, Backend, LangGraph, External Services), data-flow walkthrough, and security design.
 
+⏸ **Human-in-the-loop interrupt/resume:** [docs/HITL_INTERRUPT.md](docs/HITL_INTERRUPT.md) — LangGraph `interrupt_before=['human_review']` + review API resume.
+
 ![Claimflow Architecture](docs/architecture.png)
 
 > **Editable diagram source:** The Mermaid diagram in [docs/architecture.md](docs/architecture.md) can be copied to [mermaid.live](https://mermaid.live) to export an updated PNG/SVG.
@@ -114,9 +116,6 @@ Open the dashboard at **http://localhost:8501**.
 | `make test`   | Run pytest test suite                    |
 | `make run`          | Start uvicorn development server         |
 | `make run-frontend` | Start Streamlit demo dashboard (port 8501) |
-| `make capture-proofs` | Capture Alibaba Cloud console screenshots |
-| `make record-demo` | Record automated hackathon demo video |
-| `make install-playwright` | Install Playwright Chromium browser |
 | `make clean`        | Remove venv and build artifacts          |
 
 ---
@@ -132,10 +131,15 @@ Copy `.env.example` to `.env` and fill in the values:
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Yes      | —                        | Alibaba Cloud IAM access key secret      |
 | `OSS_BUCKET_NAME`                 | Yes      | —                        | OSS bucket for claim document storage    |
 | `OSS_ENDPOINT`                    | Yes      | —                        | OSS endpoint URL                         |
+| `API_KEY`                         | No*      | demo key in `.env.example` | Shared secret for `X-API-Key` header   |
 | `API_V1_STR`                      | No       | `/api/v1`                | API route prefix                         |
 | `PROJECT_NAME`                    | No       | `Claimflow Autopilot`    | Display name in OpenAPI docs             |
 | `LOG_LEVEL`                       | No       | `INFO`                   | Root logging level                       |
 | `ENVIRONMENT`                     | No       | `development`            | `development` / `staging` / `production` |
+
+\*Send header `X-API-Key: <API_KEY>` on `POST /claims/submit`, `POST /uploads`, and `POST /review/{id}/decision`. **`GET /health` stays public.**
+
+> **For production, set a strong `API_KEY`** (long random secret) and keep it out of git. Rotate if exposed. The Streamlit dashboard reads `API_KEY` or `CLAIMFLOW_API_KEY` from the environment.
 
 ---
 
@@ -188,15 +192,6 @@ curl http://localhost:8000/api/v1/health | jq
 ```
 
 The response includes `alibaba_cloud_services` with live status for DashScope (Qwen Cloud), OSS, and RAM credentials. See [docs/ALIBABA_CLOUD_PROOF.md](docs/ALIBABA_CLOUD_PROOF.md) for the expected JSON schema and console verification steps.
-
-### Automated artifact capture
-
-```bash
-make install-playwright   # one-time: install Chromium for Playwright
-
-make capture-proofs       # headed browser → docs/proof/*.png (login when prompted)
-make record-demo          # auto-runs demo → docs/demo-recording.mp4
-```
 
 ---
 

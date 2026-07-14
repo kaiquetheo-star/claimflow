@@ -51,6 +51,9 @@ Copy `.env.example` to `.env`. At minimum, set:
 | `REJECT_THRESHOLD` | `0.9` | Auto-reject threshold |
 | `DATABASE_URL` | — | PostgreSQL for persistent claims (optional) |
 | `PROJECT_NAME` | `Claimflow Autopilot` | Display name in API docs |
+| `API_KEY` | demo key in `.env.example` | Shared secret for `X-API-Key` on mutating endpoints |
+
+**API authentication:** send header `X-API-Key: <API_KEY>` for `POST /claims/submit`, `POST /uploads`, and `POST /review/{id}/decision`. `GET /health` is public. **For production, set a strong `API_KEY`.**
 
 See [`.env.example`](../.env.example) for the full list.
 
