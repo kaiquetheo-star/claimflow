@@ -78,7 +78,7 @@ def validate_extension(filename: str) -> str:
     if ext not in ALLOWED_EXTENSIONS:
         allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
         raise FileValidationError(
-            status_code=400,
+            status_code=422,
             detail=f"Unsupported file extension '{ext or '(none)'}'. Allowed: {allowed}.",
         )
     return ext
@@ -89,7 +89,7 @@ def validate_mime_type(content_type: str | None, extension: str) -> str:
     allowed = EXTENSION_MIME_TYPES[extension]
     if not content_type or not content_type.strip():
         raise FileValidationError(
-            status_code=400,
+            status_code=422,
             detail="Content-Type is required and must match the file extension.",
         )
 
@@ -97,7 +97,7 @@ def validate_mime_type(content_type: str | None, extension: str) -> str:
     if normalized not in allowed:
         expected = ", ".join(sorted(allowed))
         raise FileValidationError(
-            status_code=400,
+            status_code=422,
             detail=(
                 f"Content-Type '{normalized}' does not match extension '{extension}'. "
                 f"Expected: {expected}."
@@ -117,7 +117,7 @@ def validate_magic_bytes(data: bytes, extension: str) -> None:
     if extension == ".webp":
         if len(data) < 12 or data[0:4] != b"RIFF" or data[8:12] != b"WEBP":
             raise FileValidationError(
-                status_code=400,
+                status_code=422,
                 detail="File content does not match a WebP image (magic bytes).",
             )
         return
@@ -125,7 +125,7 @@ def validate_magic_bytes(data: bytes, extension: str) -> None:
     prefixes = _MAGIC_PREFIXES.get(extension, ())
     if not any(data.startswith(prefix) for prefix in prefixes):
         raise FileValidationError(
-            status_code=400,
+            status_code=422,
             detail=f"File content does not match extension '{extension}' (magic bytes).",
         )
 

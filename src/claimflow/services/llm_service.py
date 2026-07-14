@@ -21,7 +21,6 @@ from claimflow.models.agent_schemas import (
 from claimflow.services.mock_scenarios import (
     MockScenario,
     detect_mock_scenario,
-    get_mock_scenario_info,
 )
 
 if TYPE_CHECKING:

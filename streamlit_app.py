@@ -14,7 +14,7 @@ import streamlit as st
 
 from claimflow.services.mock_scenarios import get_mock_scenario_info
 
-API_BASE_URL = "http://localhost:8000/api/v1"
+API_BASE_URL = os.getenv("CLAIMFLOW_API_BASE_URL", "http://localhost:8000/api/v1").rstrip("/")
 SUBMIT_URL = f"{API_BASE_URL}/claims/submit"
 HEALTH_URL = f"{API_BASE_URL}/health"
 DECISION_URL_TEMPLATE = f"{API_BASE_URL}/review/{{claim_id}}/decision"

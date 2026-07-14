@@ -195,17 +195,36 @@ When `USE_MOCK_LLM` is not set, MockLLM still serves as the last-resort fallback
 | `make lint` | Run ruff linter |
 | `make clean` | Remove venv and build artifacts |
 
+For a full stack with Postgres in one command, see **Quick start with Docker** in the [README](../README.md):
+
+```bash
+docker compose up --build
+```
+
 ---
 
-## 8. Optional: PostgreSQL
+## 8. PostgreSQL (default)
 
-For persistent claim storage and LangGraph checkpointing:
+Claim snapshots and LangGraph checkpoints use **PostgreSQL by default**.
+
+```bash
+# Start Postgres
+make db-up   # or: docker compose up -d postgres
+
+# Apply migrations (creates `claims` table)
+make migrate
+```
+
+`.env` / `.env.example`:
 
 ```bash
 DATABASE_URL=postgresql://claimflow:claimflow@localhost:5432/claimflow
+CHECKPOINT_DATABASE_URL=postgresql://claimflow:claimflow@localhost:5432/claimflow
 ```
 
-Without `DATABASE_URL`, claims are stored in-memory and lost on server restart.
+**In-memory fallback** (quick tests without Postgres): set `DATABASE_URL=` (empty). Claims are lost on server restart.
+
+`docker compose up` starts Postgres, runs `alembic upgrade head` in the backend entrypoint, then serves the API.
 
 ---
 

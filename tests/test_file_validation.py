@@ -42,6 +42,7 @@ def _build_test_settings(upload_dir: str) -> Settings:
         oss_endpoint="https://oss-test.aliyuncs.com",
         api_key=SecretStr(_TEST_API_KEY),
         storage_backend="local",
+        database_url=None,
         local_upload_dir=upload_dir,
         use_mock_llm=True,
     )
@@ -139,7 +140,7 @@ def test_validate_extension_accepts_allowlist() -> None:
 def test_validate_extension_rejects_disallowed() -> None:
     with pytest.raises(FileValidationError) as exc:
         validate_extension("malware.exe")
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 422
     assert ".exe" in exc.value.detail
 
     with pytest.raises(FileValidationError):
@@ -155,7 +156,7 @@ def test_validate_mime_type_must_match_extension() -> None:
 
     with pytest.raises(FileValidationError) as exc:
         validate_mime_type("image/png", ".jpg")
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 422
 
     with pytest.raises(FileValidationError):
         validate_mime_type(None, ".png")
@@ -174,7 +175,7 @@ def test_validate_magic_bytes_accepts_matching_signatures() -> None:
 def test_validate_magic_bytes_rejects_spoofed_extension() -> None:
     with pytest.raises(FileValidationError) as exc:
         validate_magic_bytes(_PDF, ".png")
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 422
     assert "magic" in exc.value.detail.lower()
 
     with pytest.raises(FileValidationError):
@@ -249,7 +250,7 @@ def test_upload_endpoint_rejects_bad_extension(client: TestClient) -> None:
         files={"file": ("notes.pdf", BytesIO(_PDF), "application/pdf")},
         headers=_AUTH_HEADERS,
     )
-    assert response.status_code == 400
+    assert response.status_code == 422
     assert "extension" in response.json()["detail"].lower()
 
 
@@ -259,7 +260,7 @@ def test_upload_endpoint_rejects_mime_mismatch(client: TestClient) -> None:
         files={"file": ("photo.jpg", BytesIO(_JPEG), "image/png")},
         headers=_AUTH_HEADERS,
     )
-    assert response.status_code == 400
+    assert response.status_code == 422
     assert "content-type" in response.json()["detail"].lower()
 
 
@@ -269,7 +270,7 @@ def test_upload_endpoint_rejects_magic_byte_spoof(client: TestClient) -> None:
         files={"file": ("fake.png", BytesIO(_PDF), "image/png")},
         headers=_AUTH_HEADERS,
     )
-    assert response.status_code == 400
+    assert response.status_code == 422
     assert "magic" in response.json()["detail"].lower()
 
 

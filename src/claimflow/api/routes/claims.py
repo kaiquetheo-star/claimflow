@@ -1,6 +1,7 @@
 """Claim submission endpoints."""
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -10,7 +11,9 @@ from claimflow.agents.graph import is_awaiting_human_review, thread_config
 from claimflow.agents.states import ClaimStatus
 from claimflow.api.dependencies import get_claim_graph, get_claim_store, require_api_key
 from claimflow.api.file_validation import FileValidationError, validate_upload
+from claimflow.core.context import bind_claim_correlation
 from claimflow.core.logging import get_logger
+from claimflow.core.metrics import metrics
 from claimflow.models.schemas import ClaimResponse, ClaimSubmissionRequest
 from claimflow.services.claim_store import ClaimStore
 from claimflow.tools.factory import get_storage_client
@@ -88,11 +91,14 @@ async def submit_claim(
     checkpointed via LangGraph using ``claim_id`` as ``thread_id``.
     """
     submission = ClaimSubmissionRequest(claim_id=claim_id, raw_input_text=raw_input_text)
+    bind_claim_correlation(submission.claim_id)
+    metrics.record_submission()
     log = get_logger(__name__, claim_id=submission.claim_id)
     log.info("Claim submission received", extra={"endpoint": "/claims/submit"})
 
     image_path: str | None = None
     image_is_temporary = False
+    processing_started = perf_counter()
 
     if image is not None and image.filename:
         try:
@@ -182,6 +188,14 @@ async def submit_claim(
             payload=dict(result),
         )
 
+        elapsed = perf_counter() - processing_started
+        metrics.record_processing_time(elapsed)
+        final_status = result.get("status")
+        if hasattr(final_status, "value"):
+            metrics.record_outcome(str(final_status.value))
+        elif final_status is not None:
+            metrics.record_outcome(str(final_status))
+
         log.info(
             "Claim processing completed",
             extra={
@@ -191,6 +205,7 @@ async def submit_claim(
                 "graph_interrupted": result.get("graph_interrupted", False),
                 "risk_score": result.get("risk_score", 0.0),
                 "consistency_score": result.get("consistency_score"),
+                "duration_ms": round(elapsed * 1000, 2),
                 "checkpoint_backend": getattr(
                     request.app.state, "checkpoint_backend", "unknown"
                 ),

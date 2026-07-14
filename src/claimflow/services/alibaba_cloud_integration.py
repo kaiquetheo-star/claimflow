@@ -327,7 +327,11 @@ async def verify_alibaba_cloud_connection(
 
     logger.info(
         "Alibaba Cloud connectivity verification completed",
-        extra={"overall_status": overall, "qwen": qwen_cloud.get("status"), "oss": oss_status.get("status")},
+        extra={
+            "overall_status": overall,
+            "qwen": qwen_cloud.get("status"),
+            "oss": oss_status.get("status"),
+        },
     )
 
     return {

@@ -1,6 +1,9 @@
 # Claimflow Autopilot
 
+[![CI](https://github.com/kaiquetheo-star/claimflow/actions/workflows/ci.yml/badge.svg)](https://github.com/kaiquetheo-star/claimflow/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg?logo=docker&logoColor=white)](./Dockerfile)
 
 B2B Autopilot Agent for autonomous insurance claims processing, powered by **LangGraph**, **FastAPI**, and **Alibaba Cloud DashScope (Qwen)**.
 
@@ -49,17 +52,74 @@ See [docs/architecture.md](docs/architecture.md) for the complete 6-node pipelin
 
 ## Requirements
 
-- Python 3.11+
-- `make`
+- Python 3.11+ **or** Docker / Docker Compose
+- PostgreSQL 16+ (default persistence; in-memory fallback available)
+- `make` (for local non-Docker workflow)
 - Alibaba Cloud account with DashScope and OSS access
 
 📦 **Deployment guide:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
 ---
 
+## Quick start with Docker
+
+The fastest way to run the full stack (FastAPI + Streamlit + Postgres):
+
+```bash
+git clone <repository-url>
+cd claimflow
+cp .env.example .env
+# Edit .env — at minimum set Alibaba credentials (or keep placeholders for MockLLM demos)
+```
+
+Start all services (Postgres is included by default; the backend runs Alembic migrations on boot):
+
+```bash
+docker compose up --build
+```
+
+| Service | URL |
+|---------|-----|
+| API docs (Swagger) | http://localhost:8000/api/v1/docs |
+| Health check | http://localhost:8000/api/v1/health |
+| Prometheus metrics | http://localhost:8000/metrics |
+| Streamlit dashboard | http://localhost:8501 |
+| Postgres | `localhost:5432` (user/db `claimflow`) |
+
+Stop with `Ctrl+C`, or run detached (`docker compose up --build -d`) and stop later with `docker compose down`.
+
+Uploaded files and Postgres data are stored in named volumes (`uploads_data`, `postgres_data`).
+
+### MockLLM vs live Qwen (Docker)
+
+| Mode | `.env` setting | Behaviour |
+|------|----------------|-----------|
+| **Demo / offline** | `USE_MOCK_LLM=true` | Deterministic MockLLM scenarios; no DashScope inference |
+| **Live Qwen** | `USE_MOCK_LLM=false` (or omit) | Real DashScope Qwen / Qwen-VL calls |
+
+```bash
+# Demo mode (recommended for hackathon walkthroughs)
+echo "USE_MOCK_LLM=true" >> .env
+docker compose up --build
+
+# Live Qwen (requires a valid DASHSCOPE_API_KEY and purchased models)
+# In .env:
+#   USE_MOCK_LLM=false
+#   DASHSCOPE_API_KEY=sk-...
+docker compose up --build
+```
+
+After changing `USE_MOCK_LLM`, recreate the backend container so the new value is picked up:
+
+```bash
+docker compose up -d --force-recreate backend
+```
+
+---
+
 ## Setup
 
-See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full deployment guide. Quick start:
+See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full deployment guide. Quick start (local Python):
 
 ### 1. Clone and configure environment
 
@@ -78,7 +138,34 @@ make install
 
 This creates a `.venv` virtual environment and installs the package in editable mode with dev dependencies.
 
-### 3. Run the development server
+### 3. Database (PostgreSQL)
+
+PostgreSQL is the **default** claim store. Start a local instance and apply migrations:
+
+```bash
+# Start Postgres (Docker)
+make db-up
+
+# Apply schema migrations (creates the `claims` table)
+make migrate
+```
+
+Or point `DATABASE_URL` at any Postgres 16+ instance (see `.env.example`).
+
+| Mode | Configuration | Behaviour |
+|------|---------------|-----------|
+| **Default (Postgres)** | `DATABASE_URL=postgresql://claimflow:claimflow@localhost:5432/claimflow` | Persistent claims + LangGraph checkpoints |
+| **Quick testing** | `DATABASE_URL=` (empty) | In-memory claim store (lost on restart) |
+
+Migration helpers:
+
+```bash
+make migrate              # alembic upgrade head
+make migrate-down         # roll back one revision
+make migrate-revision MSG="add column foo"
+```
+
+### 4. Run the development server
 
 ```bash
 make run
@@ -89,7 +176,7 @@ The API will be available at:
 - **Docs (Swagger):** http://localhost:8000/api/v1/docs
 - **Health check:** http://localhost:8000/api/v1/health
 
-### 4. Frontend (Streamlit dashboard)
+### 5. Frontend (Streamlit dashboard)
 
 Run the backend and frontend in separate terminals for the full demo experience:
 
@@ -116,6 +203,9 @@ Open the dashboard at **http://localhost:8501**.
 | `make test`   | Run pytest test suite                    |
 | `make run`          | Start uvicorn development server         |
 | `make run-frontend` | Start Streamlit demo dashboard (port 8501) |
+| `make db-up`        | Start PostgreSQL via Docker Compose      |
+| `make migrate`      | Apply Alembic migrations (`upgrade head`) |
+| `make migrate-down` | Roll back the latest migration           |
 | `make clean`        | Remove venv and build artifacts          |
 
 ---
@@ -131,6 +221,8 @@ Copy `.env.example` to `.env` and fill in the values:
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Yes      | —                        | Alibaba Cloud IAM access key secret      |
 | `OSS_BUCKET_NAME`                 | Yes      | —                        | OSS bucket for claim document storage    |
 | `OSS_ENDPOINT`                    | Yes      | —                        | OSS endpoint URL                         |
+| `DATABASE_URL`                    | No       | local Postgres URL       | PostgreSQL for claims (empty = memory)   |
+| `CHECKPOINT_DATABASE_URL`         | No       | falls back to DATABASE_URL | LangGraph checkpoint Postgres URL      |
 | `API_KEY`                         | No*      | demo key in `.env.example` | Shared secret for `X-API-Key` header   |
 | `API_V1_STR`                      | No       | `/api/v1`                | API route prefix                         |
 | `PROJECT_NAME`                    | No       | `Claimflow Autopilot`    | Display name in OpenAPI docs             |
@@ -152,7 +244,9 @@ claimflow/
 │       ├── api/              # FastAPI app, routers
 │       ├── agents/           # LangGraph state & graph
 │       ├── core/             # Config, logging
+│       ├── db/               # SQLAlchemy models + claim store
 │       └── models/           # Pydantic schemas
+├── alembic/                  # Database migrations
 ├── docs/
 │   ├── architecture.md       # System architecture + Mermaid diagram
 │   ├── architecture.png      # Architecture diagram image
@@ -160,6 +254,9 @@ claimflow/
 │   ├── ALIBABA_CLOUD_PROOF.md
 │   └── screenshot.png        # Dashboard preview
 ├── tests/
+├── docker-compose.yml
+├── Dockerfile
+├── alembic.ini
 ├── .env.example
 ├── Makefile
 ├── pyproject.toml

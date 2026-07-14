@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: claimflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: claimflow
+      POSTGRES_PASSWORD: claimflow
+      POSTGRES_DB: claimflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claimflow -d claimflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: claimflow:latest
+    container_name: claimflow-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Default persistence: PostgreSQL (in-memory if DATABASE_URL is blank)
+      DATABASE_URL: postgresql://claimflow:claimflow@postgres:5432/claimflow
+      CHECKPOINT_DATABASE_URL: postgresql://claimflow:claimflow@postgres:5432/claimflow
+      LOCAL_UPLOAD_DIR: /app/uploads
+      LOCAL_UPLOAD_BASE_URL: http://localhost:8000
+      CORS_ORIGINS: http://localhost:8501,http://127.0.0.1:8501,http://localhost:8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  frontend:
+    image: claimflow:latest
+    container_name: claimflow-frontend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      CLAIMFLOW_API_BASE_URL: http://backend:8000/api/v1
+      # Frontend does not need DB; skip migrate on this service
+      DATABASE_URL: ""
+    entrypoint: ["streamlit"]
+    command:
+      [
+        "run",
+        "streamlit_app.py",
+        "--server.port=8501",
+        "--server.address=0.0.0.0",
+        "--browser.gatherUsageStats=false",
+      ]
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+volumes:
+  uploads_data:
+  postgres_data:

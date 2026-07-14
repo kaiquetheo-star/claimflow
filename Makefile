@@ -1,4 +1,5 @@
-.PHONY: install lint test coverage run run-frontend clean help
+.PHONY: install lint test coverage run run-frontend migrate migrate-down migrate-revision \
+	db-up clean help
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
@@ -7,9 +8,10 @@ RUFF := $(VENV)/bin/ruff
 PYTEST := $(VENV)/bin/pytest
 UVICORN := $(VENV)/bin/uvicorn
 STREAMLIT := $(VENV)/bin/streamlit
+ALEMBIC := $(VENV)/bin/alembic
 
 help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 install: ## Create virtualenv and install dependencies
 	python3 -m venv $(VENV)
@@ -35,6 +37,19 @@ run: ## Start the FastAPI development server
 
 run-frontend: ## Start the Streamlit demo dashboard
 	$(STREAMLIT) run streamlit_app.py --server.port 8501
+
+db-up: ## Start PostgreSQL via Docker Compose
+	docker compose up -d postgres
+
+migrate: ## Apply Alembic migrations (alembic upgrade head)
+	$(ALEMBIC) upgrade head
+
+migrate-down: ## Roll back the latest Alembic migration
+	$(ALEMBIC) downgrade -1
+
+migrate-revision: ## Create a new Alembic revision (MSG="description" required)
+	@test -n "$(MSG)" || (echo 'Usage: make migrate-revision MSG="add column foo"' && exit 1)
+	$(ALEMBIC) revision --autogenerate -m "$(MSG)"
 
 clean: ## Remove virtualenv and build artifacts
 	rm -rf $(VENV) build dist *.egg-info .pytest_cache .ruff_cache .coverage htmlcov

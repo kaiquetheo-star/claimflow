@@ -1,0 +1,55 @@
+# Git / VCS
+.git
+.gitignore
+.gitattributes
+
+# Virtual environments & local Python
+.venv
+venv
+ENV
+env
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+.eggs
+dist
+build
+*.egg
+
+# Tests & tooling
+tests
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+.coverage.*
+htmlcov
+.tox
+.nox
+
+# Secrets & local env (compose loads .env separately via env_file)
+.env
+.env.*
+!.env.example
+
+# Runtime / local data
+uploads
+tmp
+*.sqlite3
+*.log
+logs
+
+# Docs & IDE (not needed in the image)
+docs
+.cursor
+.claude
+.idea
+.vscode
+*.md
+!README.md
+
+# Docker meta (avoid recursive context weirdness)
+Dockerfile
+docker-compose*.yml
+.dockerignore

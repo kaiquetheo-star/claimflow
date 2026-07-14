@@ -11,7 +11,14 @@ from fastapi.staticfiles import StaticFiles
 
 from claimflow import __version__
 from claimflow.agents.graph import build_claim_graph
-from claimflow.api.routes import claims_router, health_router, review_router, uploads_router
+from claimflow.api.middleware import RequestIdMiddleware
+from claimflow.api.routes import (
+    claims_router,
+    health_router,
+    metrics_router,
+    review_router,
+    uploads_router,
+)
 from claimflow.core.checkpoint import CheckpointManager
 from claimflow.core.config import Settings, get_settings
 from claimflow.core.logging import get_logger, setup_logging
@@ -122,6 +129,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved_settings
 
+    # Outermost middleware runs first for incoming requests (Starlette stacking).
+    app.add_middleware(RequestIdMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=resolved_settings.cors_origins,
@@ -131,6 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(health_router, prefix=resolved_settings.api_v1_str)
+    app.include_router(metrics_router)  # GET /metrics (Prometheus convention)
     app.include_router(claims_router, prefix=resolved_settings.api_v1_str)
     app.include_router(uploads_router, prefix=resolved_settings.api_v1_str)
     app.include_router(review_router, prefix=resolved_settings.api_v1_str)

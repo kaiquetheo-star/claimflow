@@ -105,9 +105,14 @@ class Settings(BaseSettings):
     )
 
     # --- Database / checkpointing ---
+    # PostgreSQL is the default persistence backend. Set DATABASE_URL= (empty) to
+    # fall back to the in-memory claim store for quick local testing.
     database_url: str | None = Field(
-        default=None,
-        description="PostgreSQL URL for claim snapshots (SQLAlchemy asyncpg driver).",
+        default="postgresql://claimflow:claimflow@localhost:5432/claimflow",
+        description=(
+            "PostgreSQL URL for claim snapshots. When set, ClaimStore uses Postgres; "
+            "when empty/None, falls back to in-memory storage."
+        ),
     )
     checkpoint_database_url: str | None = Field(
         default=None,
@@ -172,6 +177,14 @@ class Settings(BaseSettings):
             if stripped.startswith("["):
                 return json.loads(stripped)
             return [item.strip() for item in stripped.split(",") if item.strip()]
+        return value
+
+    @field_validator("database_url", "checkpoint_database_url", mode="before")
+    @classmethod
+    def _empty_url_to_none(cls, value: object) -> object:
+        """Treat blank env values as unset (enables in-memory fallback)."""
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @property

@@ -120,11 +120,12 @@ class PostgresClaimStore:
     ) -> ClaimSnapshot:
         async with self._database.session() as session:
             record = await session.get(ClaimRecord, claim_id)
+            status_value = status.value if isinstance(status, ClaimStatus) else str(status)
             if record is None:
-                record = ClaimRecord(claim_id=claim_id, status=status, payload=payload)
+                record = ClaimRecord(claim_id=claim_id, status=status_value, payload=payload)
                 session.add(record)
             else:
-                record.status = status
+                record.status = status_value
                 record.payload = payload
                 record.updated_at = datetime.now(UTC)
             await session.commit()

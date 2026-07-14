@@ -21,6 +21,7 @@ def _build_test_settings() -> Settings:
         oss_endpoint="https://oss-test.aliyuncs.com",
         project_name=_TEST_PROJECT_NAME,
         storage_backend="local",
+        database_url=None,
         local_upload_dir="./test_uploads",
         use_mock_llm=False,
     )

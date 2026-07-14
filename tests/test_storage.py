@@ -10,7 +10,6 @@ from pydantic import SecretStr
 
 from claimflow.core.config import Settings, get_settings
 
-
 _TEST_API_KEY = "cf_hk_a8f3b2c19e4d5f60718293a4b5c6d7e8"
 _AUTH_HEADERS = {"X-API-Key": _TEST_API_KEY}
 
@@ -24,6 +23,7 @@ def _build_test_settings(upload_dir: str) -> Settings:
         oss_endpoint="https://oss-test.aliyuncs.com",
         api_key=SecretStr(_TEST_API_KEY),
         storage_backend="local",
+        database_url=None,
         local_upload_dir=upload_dir,
         local_upload_base_url="http://localhost:8000",
     )
@@ -138,17 +138,18 @@ async def test_resolve_image_path_supports_local_and_oss_backends(tmp_path: Path
 
 
 def test_upload_endpoint(client: TestClient, upload_dir: Path) -> None:
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
     response = client.post(
         "/api/v1/uploads",
-        files={"file": ("report.pdf", BytesIO(b"%PDF-1.4 test"), "application/pdf")},
+        files={"file": ("report.png", BytesIO(png), "image/png")},
         headers=_AUTH_HEADERS,
     )
 
     assert response.status_code == 201
     body = response.json()
-    assert body["filename"] == "report.pdf"
-    assert body["url"] == "http://localhost:8000/uploads/report.pdf"
-    assert (upload_dir / "report.pdf").exists()
+    assert body["filename"] == "report.png"
+    assert body["url"] == "http://localhost:8000/uploads/report.png"
+    assert (upload_dir / "report.png").exists()
 
 
 def test_static_file_served_at_uploads_path(client: TestClient, upload_dir: Path) -> None:

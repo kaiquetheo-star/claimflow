@@ -8,7 +8,9 @@ from langgraph.graph.state import CompiledStateGraph
 from claimflow.agents.graph import is_awaiting_human_review, resume_with_human_decision
 from claimflow.agents.states import ClaimStatus
 from claimflow.api.dependencies import get_claim_graph, get_claim_store, require_api_key
+from claimflow.core.context import bind_claim_correlation
 from claimflow.core.logging import get_logger
+from claimflow.core.metrics import metrics
 from claimflow.models.schemas import (
     ReviewDecisionRequest,
     ReviewDecisionResponse,
@@ -44,9 +46,7 @@ def _has_recorded_decision(payload: dict) -> bool:
     decision = payload.get("human_decision")
     if isinstance(decision, dict) and decision.get("decision"):
         return True
-    if isinstance(decision, str) and decision.strip():
-        return True
-    return False
+    return bool(isinstance(decision, str) and decision.strip())
 
 
 @router.get(
@@ -128,6 +128,8 @@ async def submit_review_decision(
     if snapshot is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found.")
 
+    bind_claim_correlation(claim_id)
+
     if snapshot.status not in _DECIDABLE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -181,15 +183,16 @@ async def submit_review_decision(
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found.")
 
+    metrics.record_outcome(updated.status.value)
+
     logger.info(
         "Human analyst decision recorded",
         extra={
             "claim_id": claim_id,
             "decision": new_status.value,
             "analyst_id": body.analyst_id,
-            "reviewer_note": body.reviewer_note,
-            "decided_at": decided_at.isoformat(),
             "graph_resumed": graph_resumed,
+            "decided_at": decided_at.isoformat(),
         },
     )
 

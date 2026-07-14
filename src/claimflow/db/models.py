@@ -15,7 +15,7 @@ class Base(DeclarativeBase):
 class ClaimRecord(Base):
     """Persisted snapshot of a claim for the human-review dashboard."""
 
-    __tablename__ = "claim_records"
+    __tablename__ = "claims"
 
     claim_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)

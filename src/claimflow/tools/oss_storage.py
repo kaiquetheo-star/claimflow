@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 from pathlib import Path
 
@@ -131,10 +132,8 @@ class OSSStorage(BaseStorage):
         finally:
             close = getattr(body, "close", None)
             if callable(close):
-                try:
+                with contextlib.suppress(Exception):
                     close()
-                except Exception:  # noqa: BLE001 — best-effort stream cleanup
-                    pass
 
         if not data:
             raise OSSStorageError(f"OSS download returned empty content for key={key}")

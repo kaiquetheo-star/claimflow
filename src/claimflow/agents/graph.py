@@ -1,6 +1,7 @@
 """LangGraph StateGraph for claim processing with DashScope/Qwen structured output."""
 
 import json
+import time
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
@@ -11,11 +12,12 @@ from langgraph.graph.state import CompiledStateGraph
 
 from claimflow.agents.states import ClaimAgentState, ClaimStatus
 from claimflow.core.config import get_settings
+from claimflow.core.context import bind_claim_correlation
 from claimflow.core.logging import get_logger
 from claimflow.models.agent_schemas import RiskAssessmentResult, ToolDecision, TriageResult
 from claimflow.services.llm_service import (
-    LLMInvocationError,
     MOCK_MODEL_NAME,
+    LLMInvocationError,
     ainvoke_llm_with_fallback,
     log_mock_llm_scenario_selection,
 )
@@ -111,9 +113,7 @@ def _weather_verification_unavailable(weather_verification: object | None) -> bo
     """Return True when weather evidence is missing or an Open-Meteo error dict."""
     if not weather_verification:
         return True
-    if isinstance(weather_verification, dict) and weather_verification.get("error"):
-        return True
-    return False
+    return bool(isinstance(weather_verification, dict) and weather_verification.get("error"))
 
 
 def _compute_fail_closed_penalties(state: ClaimAgentState) -> tuple[float, list[str]]:
@@ -170,22 +170,38 @@ def _wrap_safe_node(
     node_name: str,
     node_fn: Callable[[ClaimAgentState], Awaitable[ClaimAgentState]],
 ) -> Callable[[ClaimAgentState], Awaitable[ClaimAgentState]]:
-    """Catch unhandled exceptions so the API never crashes on graph execution."""
+    """Catch unhandled exceptions and log per-node processing time."""
 
     async def safe_node(state: ClaimAgentState) -> ClaimAgentState:
+        claim_id = state.get("claim_id")
+        if claim_id:
+            bind_claim_correlation(str(claim_id))
+
+        started = time.perf_counter()
         try:
-            return await node_fn(state)
-        except Exception as exc:
-            logger.critical(
-                "Unhandled exception in graph node",
+            try:
+                return await node_fn(state)
+            except Exception as exc:
+                logger.critical(
+                    "Unhandled exception in graph node",
+                    extra={
+                        "claim_id": claim_id,
+                        "node": node_name,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                return _system_error_state(state, node_name, f"{node_name} failed: {exc}")
+        finally:
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            logger.info(
+                "Graph node processing time",
                 extra={
-                    "claim_id": state.get("claim_id"),
+                    "claim_id": claim_id,
                     "node": node_name,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
+                    "duration_ms": duration_ms,
                 },
             )
-            return _system_error_state(state, node_name, f"{node_name} failed: {exc}")
 
     safe_node.__name__ = node_fn.__name__
     return safe_node
@@ -331,7 +347,6 @@ async def triage_node(state: ClaimAgentState) -> ClaimAgentState:
             "claim_id": claim_id,
             "node": "triage",
             "tipo_dano": triage_result.tipo_dano,
-            "cliente_nome": triage_result.cliente_nome,
             "has_image": bool(state.get("image_path")),
             "consistency_score": vision_updates.get("consistency_score"),
         },

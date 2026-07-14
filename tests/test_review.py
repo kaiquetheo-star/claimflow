@@ -24,6 +24,7 @@ def _build_test_settings() -> Settings:
         oss_endpoint="https://oss-test.aliyuncs.com",
         api_key=SecretStr(_TEST_API_KEY),
         storage_backend="local",
+        database_url=None,
         local_upload_dir="./test_uploads",
         use_mock_llm=False,
     )

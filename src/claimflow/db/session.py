@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import (
 
 from claimflow.core.config import Settings
 from claimflow.core.logging import get_logger
-from claimflow.db.models import Base
 
 logger = get_logger(__name__)
 
@@ -29,19 +28,25 @@ class Database:
         return self._engine is not None
 
     async def startup(self, settings: Settings) -> None:
-        """Create engine and tables when a database URL is provided."""
+        """Create the async engine when ``DATABASE_URL`` points at PostgreSQL.
+
+        Schema is managed by Alembic (``make migrate`` / ``alembic upgrade head``).
+        """
         url = settings.sqlalchemy_database_url
         if not url:
-            logger.info("No DATABASE_URL configured; using in-memory claim store")
+            logger.info(
+                "No DATABASE_URL configured; using in-memory claim store "
+                "(set DATABASE_URL to enable PostgreSQL persistence)"
+            )
             return
 
-        self._engine = create_async_engine(url, echo=False)
+        self._engine = create_async_engine(url, echo=False, pool_pre_ping=True)
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
 
-        async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-        logger.info("PostgreSQL claim store initialised", extra={"backend": "postgres"})
+        logger.info(
+            "PostgreSQL claim store engine ready",
+            extra={"backend": "postgres"},
+        )
 
     async def shutdown(self) -> None:
         if self._engine is not None:

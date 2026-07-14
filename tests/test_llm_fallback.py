@@ -89,10 +89,12 @@ async def test_ainvoke_llm_with_fallback_uses_mock_when_all_models_fail() -> Non
 
 @pytest.mark.asyncio
 async def test_ainvoke_llm_with_fallback_uses_mock_when_use_mock_llm_enabled() -> None:
-    from claimflow.core.config import Settings, get_settings
     from pydantic import SecretStr
 
+    from claimflow.core.config import Settings, get_settings
+
     mock_settings = Settings(
+        database_url=None,
         dashscope_api_key=SecretStr("test-key"),
         alibaba_cloud_access_key_id=SecretStr("test-id"),
         alibaba_cloud_access_key_secret=SecretStr("test-secret"),
