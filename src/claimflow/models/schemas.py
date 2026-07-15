@@ -26,7 +26,7 @@ class ImageAnalysisResult(BaseModel):
     description: str = Field(
         ...,
         min_length=1,
-        description="Detailed visual description of the damage in Portuguese.",
+        description="Detailed visual description of the damage in the selected language.",
     )
     inconsistencies: list[str] = Field(
         default_factory=list,
@@ -49,10 +49,15 @@ class ClaimSubmissionRequest(BaseModel):
         min_length=1,
         description="Raw text content of the claim submission (e.g. email body).",
         examples=[
-            "Assunto: Sinistro residencial\n\n"
-            "Boa tarde, sou Maria Silva. Houve um vazamento de água no meu apartamento "
-            "em São Paulo no dia 15/03/2026, causando danos no piso e na parede."
+            "Subject: Residential storm claim\n\n"
+            "Hello, I am Maria Silva. There was a water leak in my apartment "
+            "in São Paulo on 15/03/2026, damaging the floor and wall."
         ],
+    )
+    language: Literal["en", "pt", "es"] = Field(
+        default="en",
+        description="UI/LLM response language. Defaults to English for the hackathon.",
+        examples=["en", "pt", "es"],
     )
 
     @field_validator("claim_id", "raw_input_text", mode="before")
@@ -60,6 +65,18 @@ class ClaimSubmissionRequest(BaseModel):
     def strip_whitespace(cls, value: str) -> str:
         if isinstance(value, str):
             return value.strip()
+        return value
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def normalize_language_code(cls, value: object) -> object:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "en"
+        if isinstance(value, str):
+            code = value.strip().lower().split("-", 1)[0]
+            if code in {"en", "pt", "es"}:
+                return code
+            return "en"
         return value
 
 

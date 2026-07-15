@@ -34,12 +34,10 @@ class Database:
         """
         url = settings.sqlalchemy_database_url
         if not url:
-            logger.info(
-                "No DATABASE_URL configured; using in-memory claim store "
-                "(set DATABASE_URL to enable PostgreSQL persistence)"
-            )
+            logger.info("Claim store backend: InMemory (no DATABASE_URL)")
             return
 
+        logger.info("Claim store backend: PostgreSQL")
         self._engine = create_async_engine(url, echo=False, pool_pre_ping=True)
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
 

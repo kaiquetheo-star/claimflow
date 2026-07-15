@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from claimflow.core.i18n import Language, get_request_language, normalize_language
 from claimflow.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -89,16 +90,40 @@ def _format_location_verified(result: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def _build_summary(precipitation_mm: float, wind_kmh: float) -> str:
-    rain_part = f"{precipitation_mm:.0f}mm de chuva"
-    wind_part = f"ventos de até {wind_kmh:.0f}km/h"
+def _build_summary(
+    precipitation_mm: float,
+    wind_kmh: float,
+    language: Language | str = "en",
+) -> str:
+    lang = normalize_language(language)
+    templates: dict[Language, dict[str, str]] = {
+        "en": {
+            "none": "No precipitation recorded and no significant wind.",
+            "wind_only": "No rain recorded and winds up to {wind:.0f}km/h.",
+            "rain_only": "The day had {rain:.0f}mm of rain.",
+            "both": "The day had {rain:.0f}mm of rain and winds up to {wind:.0f}km/h.",
+        },
+        "pt": {
+            "none": "Sem precipitação registrada e sem vento significativo.",
+            "wind_only": "Sem chuva registrada e ventos de até {wind:.0f}km/h.",
+            "rain_only": "O dia teve {rain:.0f}mm de chuva.",
+            "both": "O dia teve {rain:.0f}mm de chuva e ventos de até {wind:.0f}km/h.",
+        },
+        "es": {
+            "none": "Sin precipitación registrada y sin viento significativo.",
+            "wind_only": "Sin lluvia registrada y vientos de hasta {wind:.0f}km/h.",
+            "rain_only": "El día tuvo {rain:.0f}mm de lluvia.",
+            "both": "El día tuvo {rain:.0f}mm de lluvia y vientos de hasta {wind:.0f}km/h.",
+        },
+    }
+    copy = templates[lang]
     if precipitation_mm <= 0 and wind_kmh <= 0:
-        return "Sem precipitação registrada e sem vento significativo."
+        return copy["none"]
     if precipitation_mm <= 0:
-        return f"Sem chuva registrada e {wind_part}."
+        return copy["wind_only"].format(wind=wind_kmh)
     if wind_kmh <= 0:
-        return f"O dia teve {rain_part}."
-    return f"O dia teve {rain_part} e {wind_part}."
+        return copy["rain_only"].format(rain=precipitation_mm)
+    return copy["both"].format(rain=precipitation_mm, wind=wind_kmh)
 
 
 async def _fetch_json(
@@ -115,7 +140,11 @@ async def _fetch_json(
     return payload
 
 
-async def get_weather_history(location: str, date: str) -> dict[str, Any]:
+async def get_weather_history(
+    location: str,
+    date: str,
+    language: Language | str | None = None,
+) -> dict[str, Any]:
     """Return historical weather for a location on a given date using Open-Meteo.
 
     Flow:
@@ -125,10 +154,12 @@ async def get_weather_history(location: str, date: str) -> dict[str, Any]:
     Args:
         location: City or address (e.g. ``"São Paulo, SP"``).
         date: Incident date (``YYYY-MM-DD``, ``DD/MM/YYYY``, ``ontem``, etc.).
+        language: Free-text summary language (defaults to request-scoped language).
 
     Returns:
         Friendly dict for LLM consumption, or a dict with ``error`` on failure.
     """
+    lang = normalize_language(language if language is not None else get_request_language())
     location = location.strip()
     date_input = date.strip()
 
@@ -264,7 +295,7 @@ async def get_weather_history(location: str, date: str) -> dict[str, Any]:
         "had_strong_winds": had_strong_winds,
         "precipitation_mm": round(precipitation_mm, 1),
         "max_wind_kmh": round(wind_kmh, 1),
-        "summary": _build_summary(precipitation_mm, wind_kmh),
+        "summary": _build_summary(precipitation_mm, wind_kmh, lang),
         "source": "open-meteo",
     }
 

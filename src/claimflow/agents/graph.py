@@ -13,12 +13,16 @@ from langgraph.graph.state import CompiledStateGraph
 from claimflow.agents.states import ClaimAgentState, ClaimStatus
 from claimflow.core.config import get_settings
 from claimflow.core.context import bind_claim_correlation
+from claimflow.core.i18n import Language, normalize_language, set_request_language
 from claimflow.core.logging import get_logger
 from claimflow.models.agent_schemas import RiskAssessmentResult, ToolDecision, TriageResult
 from claimflow.services.llm_service import (
     MOCK_MODEL_NAME,
     LLMInvocationError,
     ainvoke_llm_with_fallback,
+    get_investigation_system_prompt,
+    get_risk_system_prompt,
+    get_triage_system_prompt,
     log_mock_llm_scenario_selection,
 )
 from claimflow.services.vision_service import VisionService, VisionServiceError
@@ -31,48 +35,31 @@ SEVERE_INCONSISTENCY_THRESHOLD: float = 0.3
 # Fraud score applied when text and image report incompatible damage types.
 SEVERE_INCONSISTENCY_FRAUD_SCORE: float = 0.85
 
-TRIAGE_SYSTEM_PROMPT = """\
-Você é um assistente especializado em sinistros de seguros residenciais no Brasil.
-Sua tarefa é extrair informações estruturadas do texto bruto de um aviso de sinistro.
 
-Regras:
-- Extraia apenas informações explicitamente presentes ou claramente inferíveis do texto.
-- Se um campo não puder ser determinado, use valores razoáveis e indique incerteza na descrição.
-- Classifique o tipo de dano (AGUA, FOGO, VENTO, OUTRO) com base no relato.
-- A descrição resumida deve ter no máximo 3 frases em português brasileiro.
-- Para data_incidente, retorne null se a data não for mencionada.
-"""
+def _state_language(state: ClaimAgentState) -> Language:
+    """Resolve the claim language from graph state (default: English)."""
+    return normalize_language(state.get("language"))
 
-INVESTIGATION_SYSTEM_PROMPT = """\
-Você é um investigador de sinistros de seguros residenciais no Brasil.
-Analise o relato do cliente e decida se é necessária verificação climática externa.
 
-Regras:
-- Analise o relato do cliente. Se ele mencionar eventos climáticos (chuva, vento, \
-tempestade, granizo, vendaval) e fornecer uma localização e data, você DEVE decidir \
-chamar a ferramenta 'get_weather_history'.
-- Nesse caso, defina requires_tool_call=True, tool_name='get_weather_history' e preencha \
-tool_arguments com {"location": "...", "date": "..."} extraídos do texto.
-- Caso contrário, retorne requires_tool_call=False, tool_name='none' e tool_arguments={}.
-- Explique sua decisão em reasoning.
-- Use formatos razoáveis para local e data (ex.: "São Paulo, SP", "2026-03-15" ou "ontem").
-"""
+def triage_system_prompt(lang: Language = "en") -> str:
+    """Build the triage system prompt for the selected output language."""
+    return get_triage_system_prompt(lang)
 
-RISK_SYSTEM_PROMPT = """\
-Você é um analista sênior de fraudes em sinistros de seguros, com postura cética \
-e baseada em evidências.
-Avalie o sinistro estruturado abaixo e atribua scores de risco de fraude e severidade.
 
-Diretrizes:
-- Seja cético: procure inconsistências, exageros, omissões e padrões típicos de fraude.
-- Considere a análise visual (se fornecida) e o score de consistência texto-imagem.
-- Considere a verificação climática (se fornecida) ao avaliar coerência do relato.
-- fraud_risk_score: probabilidade de intenção fraudulenta (0.0 = sem indícios, 1.0 = altíssima).
-- severity_score: impacto financeiro/operacional estimado (0.0 = trivial, 1.0 = catastrófico).
-- justificativa_risco: explique os fatores que influenciaram os scores (em português).
-- requires_human_review: true se houver qualquer dúvida material que exija um perito humano.
-- Não aprove sinistros automaticamente; sua função é apenas avaliar risco.
-"""
+def investigation_system_prompt(lang: Language = "en") -> str:
+    """Build the investigation system prompt for the selected output language."""
+    return get_investigation_system_prompt(lang)
+
+
+def risk_system_prompt(lang: Language = "en") -> str:
+    """Build the risk-assessment system prompt for the selected output language."""
+    return get_risk_system_prompt(lang)
+
+
+# Backwards-compatible aliases (English default) for imports/tests.
+TRIAGE_SYSTEM_PROMPT = get_triage_system_prompt("en")
+INVESTIGATION_SYSTEM_PROMPT = get_investigation_system_prompt("en")
+RISK_SYSTEM_PROMPT = get_risk_system_prompt("en")
 
 
 FAIL_CLOSED_REASON = "Insufficient data extracted from claim"
@@ -247,7 +234,11 @@ async def _run_vision_cross_validation(
     vision = VisionService()
 
     try:
-        image_analysis = await vision.analyze_claim_image(image_path, state["raw_input"])
+        image_analysis = await vision.analyze_claim_image(
+            image_path,
+            state["raw_input"],
+            language=_state_language(state),
+        )
     except VisionServiceError as exc:
         logger.error(
             "Vision analysis failed; escalating fraud signal",
@@ -298,11 +289,12 @@ async def _run_vision_cross_validation(
 async def triage_node(state: ClaimAgentState) -> ClaimAgentState:
     """Extract structured claim fields and optionally cross-validate with Qwen-VL."""
     claim_id = state["claim_id"]
+    set_request_language(_state_language(state))
     log = logger
     log.info("Triage node started", extra={"claim_id": claim_id, "node": "triage"})
 
     messages = [
-        SystemMessage(content=TRIAGE_SYSTEM_PROMPT),
+        SystemMessage(content=triage_system_prompt(_state_language(state))),
         HumanMessage(content=state["raw_input"]),
     ]
 
@@ -363,13 +355,13 @@ async def triage_node(state: ClaimAgentState) -> ClaimAgentState:
     }
 
 
-async def _invoke_weather_tool(tool_arguments: dict) -> dict:
+async def _invoke_weather_tool(tool_arguments: dict, language: Language = "en") -> dict:
     """Call get_weather_history with validated arguments from ToolDecision."""
     location = str(tool_arguments.get("location", "")).strip()
     date = str(tool_arguments.get("date", "")).strip()
     if not location or not date:
         raise ValueError("tool_arguments must include non-empty 'location' and 'date'")
-    return await get_weather_history(location, date)
+    return await get_weather_history(location, date, language=language)
 
 
 async def investigation_node(state: ClaimAgentState) -> ClaimAgentState:
@@ -379,6 +371,8 @@ async def investigation_node(state: ClaimAgentState) -> ClaimAgentState:
     True, this node invokes :func:`get_weather_history` directly — no LangChain bind_tools.
     """
     claim_id = state["claim_id"]
+    lang = _state_language(state)
+    set_request_language(lang)
     log = logger
     log.info("Investigation node started", extra={"claim_id": claim_id, "node": "investigation"})
 
@@ -386,7 +380,7 @@ async def investigation_node(state: ClaimAgentState) -> ClaimAgentState:
         return state
 
     messages = [
-        SystemMessage(content=INVESTIGATION_SYSTEM_PROMPT),
+        SystemMessage(content=investigation_system_prompt(lang)),
         HumanMessage(content=state["raw_input"]),
     ]
 
@@ -419,7 +413,10 @@ async def investigation_node(state: ClaimAgentState) -> ClaimAgentState:
 
     if tool_decision.requires_tool_call and tool_decision.tool_name == "get_weather_history":
         try:
-            weather_verification = await _invoke_weather_tool(tool_decision.tool_arguments)
+            weather_verification = await _invoke_weather_tool(
+                tool_decision.tool_arguments,
+                language=lang,
+            )
             tool_calls_made.append("get_weather_history")
         except Exception as exc:
             log.error(
@@ -450,9 +447,39 @@ async def investigation_node(state: ClaimAgentState) -> ClaimAgentState:
     }
 
 
+def _risk_context_labels(lang: Language) -> dict[str, str]:
+    """Section headers for the risk-assessment human message."""
+    labels: dict[Language, dict[str, str]] = {
+        "en": {
+            "claim": "Claim data (claim_id={claim_id}):\n",
+            "vision": "\nVisual analysis (Qwen-VL):\n",
+            "consistency": "\nText-image consistency score: {score:.2f}",
+            "weather": "\nWeather verification:\n",
+            "pre_triage": "\nPre-triage fraud score (visual inconsistency): {score:.2f}",
+        },
+        "pt": {
+            "claim": "Dados do sinistro (claim_id={claim_id}):\n",
+            "vision": "\nAnálise visual (Qwen-VL):\n",
+            "consistency": "\nScore de consistência texto-imagem: {score:.2f}",
+            "weather": "\nVerificação climática:\n",
+            "pre_triage": "\nFraud score pré-triage (inconsistência visual): {score:.2f}",
+        },
+        "es": {
+            "claim": "Datos del siniestro (claim_id={claim_id}):\n",
+            "vision": "\nAnálisis visual (Qwen-VL):\n",
+            "consistency": "\nPuntuación de consistencia texto-imagen: {score:.2f}",
+            "weather": "\nVerificación climática:\n",
+            "pre_triage": "\nFraud score pre-triaje (inconsistencia visual): {score:.2f}",
+        },
+    }
+    return labels[lang]
+
+
 async def risk_assessment_node(state: ClaimAgentState) -> ClaimAgentState:
     """Assess fraud risk and severity from triage + vision data using a sceptical LLM."""
     claim_id = state["claim_id"]
+    lang = _state_language(state)
+    set_request_language(lang)
     log = logger
     log.info(
         "Risk assessment node started",
@@ -501,31 +528,30 @@ async def risk_assessment_node(state: ClaimAgentState) -> ClaimAgentState:
             "error_message": FAIL_CLOSED_REASON,
         }
 
+    labels = _risk_context_labels(lang)
     context_parts = [
-        f"Dados do sinistro (claim_id={claim_id}):\n",
+        labels["claim"].format(claim_id=claim_id),
         json.dumps(extracted_data, ensure_ascii=False, indent=2),
     ]
     if state.get("image_analysis"):
         context_parts.append(
-            "\nAnálise visual (Qwen-VL):\n"
+            labels["vision"]
             + json.dumps(state["image_analysis"], ensure_ascii=False, indent=2)
         )
     if state.get("consistency_score") is not None:
         score = state["consistency_score"]
-        context_parts.append(f"\nScore de consistência texto-imagem: {score:.2f}")
+        context_parts.append(labels["consistency"].format(score=score))
     if state.get("weather_verification"):
         context_parts.append(
-            "\nVerificação climática:\n"
+            labels["weather"]
             + json.dumps(state["weather_verification"], ensure_ascii=False, indent=2)
         )
     if pre_triage_fraud > 0:
-        context_parts.append(
-            f"\nFraud score pré-triage (inconsistência visual): {pre_triage_fraud:.2f}"
-        )
+        context_parts.append(labels["pre_triage"].format(score=pre_triage_fraud))
 
     triage_payload = "".join(context_parts)
     messages = [
-        SystemMessage(content=RISK_SYSTEM_PROMPT),
+        SystemMessage(content=risk_system_prompt(lang)),
         HumanMessage(content=triage_payload),
     ]
 

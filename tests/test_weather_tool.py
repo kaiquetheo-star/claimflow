@@ -64,12 +64,14 @@ async def test_get_weather_history_success() -> None:
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
     with patch("claimflow.tools.weather_tool.httpx.AsyncClient", return_value=mock_client):
-        result = await get_weather_history("São Paulo, SP", "2024-03-15")
+        result = await get_weather_history("São Paulo, SP", "2024-03-15", language="en")
 
     assert result["source"] == "open-meteo"
     assert result["had_heavy_rain"] is True
     assert result["had_strong_winds"] is True
     assert "45mm" in result["summary"]
+    assert "rain" in result["summary"].lower()
+    assert "chuva" not in result["summary"].lower()
     assert result["location_verified"].startswith("São Paulo")
 
     assert mock_client.get.await_count == 2

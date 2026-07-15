@@ -80,10 +80,26 @@ async def test_analyze_claim_image_api_error_returns_mock(tmp_path) -> None:
         return_value=mock_response,
     ):
         service = VisionService()
-        result = await service.analyze_claim_image(str(image_file), "Incêndio no apartamento.")
+        result = await service.analyze_claim_image(
+            str(image_file),
+            "Apartment fire last night.",
+            language="en",
+        )
 
     assert result["detected_damage_type"] == "AGUA"
     assert result["source"] == "mock"
+    assert "Mock image" in result["description"]
+    assert any("fire" in item.lower() for item in result["inconsistencies"])
+    assert not any("incêndio" in item.lower() for item in result["inconsistencies"])
+
+
+def test_build_mock_analysis_localizes_free_text() -> None:
+    en = VisionService.build_mock_analysis("Kitchen caught fire yesterday", "en")
+    pt = VisionService.build_mock_analysis("Incêndio na cozinha ontem", "pt")
+    assert "Mock image" in en["description"]
+    assert "Imagem mock" in pt["description"]
+    assert any("fire" in item.lower() for item in en["inconsistencies"])
+    assert any("incêndio" in item.lower() for item in pt["inconsistencies"])
 
 
 @pytest.mark.asyncio

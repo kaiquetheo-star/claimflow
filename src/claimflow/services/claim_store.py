@@ -25,10 +25,12 @@ class ClaimStore:
         return self._backend_name
 
     async def startup(self, settings: Settings, database: Database) -> None:
-        if database.is_configured:
+        if settings.database_url and database.is_configured:
+            logger.info("Claim store backend: PostgreSQL")
             self._backend = PostgresClaimStore(database)
             self._backend_name = "postgres"
         else:
+            logger.info("Claim store backend: InMemory (no DATABASE_URL)")
             self._backend = InMemoryClaimStore()
             self._backend_name = "memory"
         logger.info("Claim store initialised", extra={"backend": self._backend_name})

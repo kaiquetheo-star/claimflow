@@ -200,6 +200,52 @@ def test_submit_success_with_valid_data(
     harness.mock_graph.ainvoke.assert_awaited_once()
 
 
+def test_submit_accepts_language_and_passes_to_graph_state(
+    harness: SubmitHarness,
+    sample_claim: dict[str, str],
+) -> None:
+    """POST /claims/submit accepts language and injects it into LangGraph state."""
+    data = {**sample_claim, "language": "pt"}
+    response = harness.client.post(
+        "/api/v1/claims/submit",
+        data=data,
+        headers=_AUTH_HEADERS,
+    )
+
+    assert response.status_code == 202
+    harness.mock_graph.ainvoke.assert_awaited_once()
+    call_args = harness.mock_graph.ainvoke.await_args
+    initial_state = call_args.args[0]
+    assert initial_state["language"] == "pt"
+
+
+def test_submit_defaults_language_to_english(
+    harness: SubmitHarness,
+    sample_claim: dict[str, str],
+) -> None:
+    response = harness.client.post(
+        "/api/v1/claims/submit",
+        data=sample_claim,
+        headers=_AUTH_HEADERS,
+    )
+
+    assert response.status_code == 202
+    initial_state = harness.mock_graph.ainvoke.await_args.args[0]
+    assert initial_state["language"] == "en"
+
+
+def test_submit_rejects_unsupported_language(
+    harness: SubmitHarness,
+    sample_claim: dict[str, str],
+) -> None:
+    response = harness.client.post(
+        "/api/v1/claims/submit",
+        data={**sample_claim, "language": "fr"},
+        headers=_AUTH_HEADERS,
+    )
+    assert response.status_code == 422
+
+
 def test_submit_with_mock_llm_deterministic_response(harness: SubmitHarness) -> None:
     """MockLLM mode is enabled; graph mock returns fixed fraud-scenario scores."""
     assert harness.settings.use_mock_llm is True

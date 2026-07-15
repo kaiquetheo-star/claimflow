@@ -154,8 +154,8 @@ Or point `DATABASE_URL` at any Postgres 16+ instance (see `.env.example`).
 
 | Mode | Configuration | Behaviour |
 |------|---------------|-----------|
-| **Default (Postgres)** | `DATABASE_URL=postgresql://claimflow:claimflow@localhost:5432/claimflow` | Persistent claims + LangGraph checkpoints |
-| **Quick testing** | `DATABASE_URL=` (empty) | In-memory claim store (lost on restart) |
+| **Default (in-memory)** | `DATABASE_URL` unset/commented | In-memory claims + checkpoints (lost on restart) |
+| **Postgres** | `DATABASE_URL=postgresql://claimflow:claimflow@localhost:5432/claimflow` | Persistent claims + LangGraph checkpoints |
 
 Migration helpers:
 
@@ -221,8 +221,9 @@ Copy `.env.example` to `.env` and fill in the values:
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Yes      | —                        | Alibaba Cloud IAM access key secret      |
 | `OSS_BUCKET_NAME`                 | Yes      | —                        | OSS bucket for claim document storage    |
 | `OSS_ENDPOINT`                    | Yes      | —                        | OSS endpoint URL                         |
-| `DATABASE_URL`                    | No       | local Postgres URL       | PostgreSQL for claims (empty = memory)   |
+| `DATABASE_URL`                    | No       | unset (in-memory)        | PostgreSQL for claims (unset = memory)   |
 | `CHECKPOINT_DATABASE_URL`         | No       | falls back to DATABASE_URL | LangGraph checkpoint Postgres URL      |
+| `CLAIMFLOW_PORT`                  | No       | `8000`                   | API server port (`make run` / uvicorn)   |
 | `API_KEY`                         | No*      | demo key in `.env.example` | Shared secret for `X-API-Key` header   |
 | `API_V1_STR`                      | No       | `/api/v1`                | API route prefix                         |
 | `PROJECT_NAME`                    | No       | `Claimflow Autopilot`    | Display name in OpenAPI docs             |

@@ -12,6 +12,7 @@ from claimflow.agents.states import ClaimStatus
 from claimflow.api.dependencies import get_claim_graph, get_claim_store, require_api_key
 from claimflow.api.file_validation import FileValidationError, validate_upload
 from claimflow.core.context import bind_claim_correlation
+from claimflow.core.i18n import set_request_language
 from claimflow.core.logging import get_logger
 from claimflow.core.metrics import metrics
 from claimflow.models.schemas import ClaimResponse, ClaimSubmissionRequest
@@ -78,6 +79,11 @@ async def submit_claim(
     request: Request,
     claim_id: str = Form(..., description="Unique claim identifier."),
     raw_input_text: str = Form(..., description="Raw claim text (e.g. email body)."),
+    language: str = Form(
+        default="en",
+        pattern="^(en|pt|es)$",
+        description="UI/LLM response language: en (default), pt, or es.",
+    ),
     image: UploadFile | None = File(
         default=None,
         description="Optional claim photo for Qwen-VL visual analysis.",
@@ -90,11 +96,19 @@ async def submit_claim(
     Accepts ``multipart/form-data`` with optional image upload. State is
     checkpointed via LangGraph using ``claim_id`` as ``thread_id``.
     """
-    submission = ClaimSubmissionRequest(claim_id=claim_id, raw_input_text=raw_input_text)
+    submission = ClaimSubmissionRequest(
+        claim_id=claim_id,
+        raw_input_text=raw_input_text,
+        language=language,  # type: ignore[arg-type]
+    )
+    resolved_language = set_request_language(submission.language)
     bind_claim_correlation(submission.claim_id)
     metrics.record_submission()
     log = get_logger(__name__, claim_id=submission.claim_id)
-    log.info("Claim submission received", extra={"endpoint": "/claims/submit"})
+    log.info(
+        "Claim submission received",
+        extra={"endpoint": "/claims/submit", "language": resolved_language},
+    )
 
     image_path: str | None = None
     image_is_temporary = False
@@ -135,6 +149,7 @@ async def submit_claim(
     initial_state: dict = {
         "claim_id": submission.claim_id,
         "raw_input": submission.raw_input_text,
+        "language": resolved_language,
         "image_path": image_path,
         "extracted_data": {},
         "image_analysis": None,

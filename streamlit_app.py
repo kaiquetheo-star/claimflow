@@ -12,9 +12,17 @@ from typing import Any
 import requests
 import streamlit as st
 
+from claimflow.core.i18n import (
+    DEFAULT_LANGUAGE,
+    Language,
+    get_available_languages,
+    normalize_language,
+    t,
+)
 from claimflow.services.mock_scenarios import get_mock_scenario_info
 
-API_BASE_URL = os.getenv("CLAIMFLOW_API_BASE_URL", "http://localhost:8000/api/v1").rstrip("/")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8001").rstrip("/")
+API_BASE_URL = f"{BACKEND_URL}/api/v1"
 SUBMIT_URL = f"{API_BASE_URL}/claims/submit"
 HEALTH_URL = f"{API_BASE_URL}/health"
 DECISION_URL_TEMPLATE = f"{API_BASE_URL}/review/{{claim_id}}/decision"
@@ -34,53 +42,113 @@ def _api_headers() -> dict[str, str]:
 ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png"}
 FRAUD_HIGH_RISK_THRESHOLD = 0.7
 
-PROCESSING_STEPS: list[tuple[str, str, str]] = [
-    ("📥", "Receiving claim data...", "intake"),
-    ("🤖", "Extracting structured data from text...", "triage"),
-    ("👁️", "Analyzing image with Qwen-VL...", "vision"),
-    ("🌦️", "Verifying weather conditions via Open-Meteo...", "weather"),
-    ("⚖️", "Calculating fraud risk score...", "risk"),
-]
 
-DEMO_CLAIMS: dict[str, dict[str, str]] = {
-    "fraud": {
-        "label": "Example 1: Obvious Fraud",
-        "claim_id": "CLM-FRAUD-001",
-        "text": (
-            "Assunto: Sinistro residencial — incêndio\n\n"
-            "Boa tarde, sou Carlos Mendes. Meu apartamento pegou fogo ontem à noite "
-            "em São Paulo. O fogo destruiu a cozinha e parte da sala. "
-            "Preciso de indenização urgente pelo incêndio."
-        ),
-        "hint": "Upload a water-damage / leak photo to trigger text-vs-image inconsistency.",
-    },
-    "legitimate": {
-        "label": "Example 2: Legitimate Claim",
-        "claim_id": "CLM-LEGIT-002",
-        "text": (
-            "Assunto: Sinistro por tempestade\n\n"
-            "Olá, sou Ana Paula. A tempestade de ontem em São Paulo causou vazamento "
-            "no telhado do meu apartamento. Chuva forte entrou pela cobertura e danificou "
-            "o forro e o piso da sala em 06/07/2026."
-        ),
-        "hint": "Upload a storm / water damage photo for a consistent claim.",
-    },
-    "ambiguous": {
-        "label": "Example 3: Ambiguous Case",
-        "claim_id": "CLM-AMB-003",
-        "text": (
-            "Preciso de ajuda com um problema na minha casa. "
-            "Algo aconteceu e preciso resolver com o seguro."
-        ),
-        "hint": "Submit without an image to test fail-closed data extraction handling.",
-    },
-}
+def _lang() -> Language:
+    """Return the currently selected UI language, defaulting to English."""
+    return normalize_language(st.session_state.get("language", DEFAULT_LANGUAGE))
+
+
+def _processing_steps(lang: Language) -> list[tuple[str, str, str]]:
+    return [
+        ("📥", t("receiving_data", lang), "intake"),
+        ("🤖", t("extracting_text", lang), "triage"),
+        ("👁️", t("analyzing_image", lang), "vision"),
+        ("🌦️", t("verifying_weather", lang), "weather"),
+        ("⚖️", t("calculating_risk", lang), "risk"),
+    ]
+
+
+def _demo_claims(lang: Language) -> dict[str, dict[str, str]]:
+    """Return demo claim presets.
+
+    Claim *bodies* default to English (hackathon). Labels/hints follow ``lang``.
+    Localized bodies are provided for pt/es so keyword-based MockLLM detection
+    still works when the UI language is switched.
+    """
+    bodies: dict[str, dict[Language, str]] = {
+        "legitimate": {
+            "en": (
+                "Subject: Storm damage claim\n\n"
+                "Hello, I am Ana Paula. Yesterday's storm in São Paulo caused a leak "
+                "in my apartment roof. Heavy rain came through the covering and damaged "
+                "the ceiling and living-room floor on 06/07/2026."
+            ),
+            "pt": (
+                "Assunto: Sinistro por tempestade\n\n"
+                "Olá, sou Ana Paula. A tempestade de ontem em São Paulo causou vazamento "
+                "no telhado do meu apartamento. Chuva forte entrou pela cobertura e danificou "
+                "o forro e o piso da sala em 06/07/2026."
+            ),
+            "es": (
+                "Asunto: Siniestro por tormenta\n\n"
+                "Hola, soy Ana Paula. La tormenta de ayer en São Paulo causó una filtración "
+                "en el techo de mi apartamento. La lluvia fuerte dañó el cielo raso "
+                "y el piso de la sala el 06/07/2026."
+            ),
+        },
+        "fraud": {
+            "en": (
+                "Subject: Residential fire claim\n\n"
+                "Good afternoon, I am Carlos Mendes. My apartment caught fire last night "
+                "in São Paulo. The fire destroyed the kitchen and part of the living room. "
+                "I urgently need compensation for the fire."
+            ),
+            "pt": (
+                "Assunto: Sinistro residencial — incêndio\n\n"
+                "Boa tarde, sou Carlos Mendes. Meu apartamento pegou fogo ontem à noite "
+                "em São Paulo. O fogo destruiu a cozinha e parte da sala. "
+                "Preciso de indenização urgente pelo incêndio."
+            ),
+            "es": (
+                "Asunto: Siniestro residencial — incendio\n\n"
+                "Buenas tardes, soy Carlos Mendes. Mi apartamento se incendió anoche "
+                "en São Paulo. El fuego destruyó la cocina y parte de la sala. "
+                "Necesito compensación urgente por el incendio."
+            ),
+        },
+        "ambiguous": {
+            "en": (
+                "I need help with a problem at my house. "
+                "Something happened and I need to resolve it with the insurance."
+            ),
+            "pt": (
+                "Preciso de ajuda com um problema na minha casa. "
+                "Algo aconteceu e preciso resolver com o seguro."
+            ),
+            "es": (
+                "Necesito ayuda con un problema en mi casa. "
+                "Algo ocurrió y necesito resolverlo con el seguro."
+            ),
+        },
+    }
+    return {
+        "legitimate": {
+            "label": t("example_storm", lang),
+            "claim_id": "CLM-LEGIT-002",
+            "text": bodies["legitimate"][lang],
+            "hint": t("demo_hint_legit", lang),
+        },
+        "fraud": {
+            "label": t("example_fraud", lang),
+            "claim_id": "CLM-FRAUD-001",
+            "text": bodies["fraud"][lang],
+            "hint": t("demo_hint_fraud", lang),
+        },
+        "ambiguous": {
+            "label": t("example_ambiguous", lang),
+            "claim_id": "CLM-AMB-003",
+            "text": bodies["ambiguous"][lang],
+            "hint": t("demo_hint_ambiguous", lang),
+        },
+    }
+
 
 logger = logging.getLogger("claimflow.frontend")
 
 
 def _init_session_state() -> None:
     defaults: dict[str, Any] = {
+        "language": DEFAULT_LANGUAGE,
         "claim_id": "CLM-001",
         "claim_result": None,
         "claim_detail": None,
@@ -142,19 +210,6 @@ def _inject_styles() -> None:
             color: #e2e8f0;
             font-size: 0.95rem;
         }
-        .cf-logo {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 48px;
-            height: 48px;
-            border-radius: 10px;
-            background: #FF6A00;
-            font-size: 1.5rem;
-            margin-right: 0.75rem;
-            vertical-align: middle;
-        }
-
         .cf-card {
             background: #ffffff;
             border: 1px solid #e2e8f0;
@@ -287,6 +342,23 @@ def _inject_styles() -> None:
             border-radius: 4px;
             margin-bottom: 0.5rem;
         }
+
+        /* Suppress Streamlit's decorative cartoon/spinner media */
+        div[data-testid="stSpinner"] img,
+        .stSpinner img {
+            display: none !important;
+        }
+        div[data-testid="stSpinner"] > div {
+            border: 3px solid #e2e8f0;
+            border-top-color: #FF6A00;
+            border-radius: 50%;
+            width: 28px;
+            height: 28px;
+            animation: cf-spin 0.8s linear infinite;
+        }
+        @keyframes cf-spin {
+            to { transform: rotate(360deg); }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -294,20 +366,19 @@ def _inject_styles() -> None:
 
 
 def _render_header() -> None:
+    lang = _lang()
     st.markdown(
-        """
+        f"""
         <div class="cf-header">
-            <span class="cf-logo">🛡️</span>
-            <span style="vertical-align: middle;">
-                <h1 style="display:inline;">Claimflow Autopilot</h1>
-                <p>Enterprise AI Claims Intelligence · Powered by Qwen Cloud · Track 4</p>
-            </span>
+            <h1>{t("app_title", lang)}</h1>
+            <p>{t("app_subtitle", lang)}</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def check_backend_health() -> bool:
     try:
         response = requests.get(HEALTH_URL, timeout=3)
@@ -316,6 +387,7 @@ def check_backend_health() -> bool:
         return False
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def fetch_health_status() -> dict[str, Any] | None:
     """Return parsed ``/health`` JSON or ``None`` when the backend is unreachable."""
     try:
@@ -330,23 +402,20 @@ def fetch_health_status() -> dict[str, Any] | None:
 
 def _render_mock_mode_banner() -> None:
     """Show a prominent banner when the backend runs in MockLLM demo mode."""
+    lang = _lang()
     health = fetch_health_status()
     if not health or not health.get("mock_mode"):
         return
 
     qwen = (health.get("alibaba_cloud_services") or {}).get("qwen_cloud", {})
     qwen_ok = qwen.get("status") == "connected"
-    connectivity_line = (
-        "Real Qwen Cloud connectivity verified via /health endpoint (200 OK)."
-        if qwen_ok
-        else "DashScope health check pending — verify DASHSCOPE_API_KEY in .env."
-    )
+    connectivity_line = t("qwen_connected", lang) if qwen_ok else t("qwen_pending", lang)
 
     st.markdown(
         f"""
         <div class="demo-mode-banner">
-            <h3>🎭 Demo Mode Active</h3>
-            <p>The system is using deterministic MockLLM scenarios for consistent demonstration.</p>
+            <h3>{t("demo_mode_active", lang)}</h3>
+            <p>{t("demo_mode_desc", lang)}</p>
             <p>{connectivity_line}</p>
         </div>
         """,
@@ -356,15 +425,15 @@ def _render_mock_mode_banner() -> None:
 
 def _render_current_scenario_panel() -> None:
     """Show which MockLLM scenario will be selected from the current claim text."""
+    lang = _lang()
     health = fetch_health_status()
     if not health or not health.get("mock_mode"):
         return
 
     claim_text = st.session_state.get("input_raw_text", "") or ""
     info = get_mock_scenario_info(claim_text)
-    keyword_line = f"**Why:** {info['keyword_reason']}"
 
-    st.markdown("### 📊 Current Scenario")
+    st.markdown(f"### {t('current_scenario', lang)}")
     st.markdown(
         f"""
         <div class="scenario-panel">
@@ -374,40 +443,68 @@ def _render_current_scenario_panel() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.caption(keyword_line.replace("**Why:** ", ""))
-    st.caption(f"Expected: {info['expected_outcome']}")
+    st.caption(t("scenario_why", lang, info["keyword_reason"]))
+    st.caption(t("scenario_expected", lang, info["expected_outcome"]))
 
 
 def _render_sidebar() -> None:
-    backend_ok = check_backend_health()
-    dot_class = "online" if backend_ok else "offline"
-    status_label = "Operational" if backend_ok else "Offline"
-
     with st.sidebar:
-        st.markdown("### 🛡️ Control Panel")
+        lang_options = get_available_languages()
+        current_idx = next(
+            (
+                i
+                for i, (code, _) in enumerate(lang_options)
+                if code == st.session_state.get("language", DEFAULT_LANGUAGE)
+            ),
+            0,
+        )
+        selected = st.selectbox(
+            t("language_selector", st.session_state.get("language", DEFAULT_LANGUAGE)),
+            options=[code for code, _ in lang_options],
+            format_func=lambda code: dict(lang_options)[code],
+            index=current_idx,
+        )
+        if selected != st.session_state.get("language", DEFAULT_LANGUAGE):
+            st.session_state.language = normalize_language(selected)
+            st.rerun()
+
+        lang = _lang()
+
+        backend_ok = check_backend_health()
+        dot_class = "online" if backend_ok else "offline"
+        status_label = t("operational", lang) if backend_ok else t("offline", lang)
+
+        st.markdown(f"### {t('control_panel', lang)}")
         st.markdown(
-            f'<span class="status-dot {dot_class}"></span> **System Status:** {status_label}',
+            f'<span class="status-dot {dot_class}"></span> '
+            f'**{t("system_status", lang)}:** {status_label}',
             unsafe_allow_html=True,
         )
-        st.caption("Live connection to FastAPI backend on port 8000.")
+        st.caption(t("backend_caption", lang))
         st.divider()
 
-        st.metric("Today's Claims", "47", delta="12 today", delta_color="normal")
-        st.caption("Claims processed across all channels today.")
-        st.metric("Fraud Detection Rate", "23%", delta="↑ 3% vs last week", delta_color="inverse")
-        st.caption("Share of submissions flagged for human review.")
+        st.metric(t("todays_claims", lang), "47", delta="12 today", delta_color="normal")
+        st.caption(t("claims_caption", lang))
+        st.metric(
+            t("fraud_detection_rate", lang),
+            "23%",
+            delta="↑ 3% vs last week",
+            delta_color="inverse",
+        )
+        st.caption(t("fraud_rate_caption", lang))
         st.divider()
 
         st.session_state.demo_mode = st.toggle(
-            "Demo Mode",
+            t("demo_mode_label", lang),
             value=st.session_state.demo_mode,
-            help="Load pre-built example claims for live demonstrations.",
+            help=t("demo_mode_help", lang),
         )
 
         if st.session_state.demo_mode:
-            st.markdown("**Quick-load examples**")
-            for key, example in DEMO_CLAIMS.items():
-                if st.button(example["label"], key=f"demo_{key}", use_container_width=True):
+            st.markdown(f"**{t('quick_load_examples', lang)}**")
+            demo_claims = _demo_claims(lang)
+            for key, example in demo_claims.items():
+                if st.button(example["label"], key=f"demo_{key}", width="stretch"):
                     st.session_state.input_claim_id = example["claim_id"]
                     st.session_state.input_raw_text = example["text"]
                     st.session_state.demo_hint = example["hint"]
@@ -421,7 +518,7 @@ def _render_sidebar() -> None:
         _render_current_scenario_panel()
 
         st.divider()
-        st.markdown("### 📋 Decision History")
+        st.markdown(f"### {t('decision_history', lang)}")
         history = st.session_state.decision_history
         if history:
             for entry in history[:5]:
@@ -431,31 +528,37 @@ def _render_sidebar() -> None:
                     notes_preview = f"{notes_preview[:57]}..."
                 st.caption(
                     f"{icon} **{entry['claim_id']}** · {entry['timestamp']}\n\n"
-                    f"{notes_preview or '(no notes)'}"
+                    f"{notes_preview or t('no_notes', lang)}"
                 )
         else:
-            st.caption("No analyst decisions recorded yet.")
+            st.caption(t("no_decisions_yet", lang))
 
 
-def _validate_image(uploaded_file: Any) -> str | None:
+def _validate_image(uploaded_file: Any, lang: Language) -> str | None:
     if uploaded_file is None:
         return None
     extension = uploaded_file.name.rsplit(".", 1)[-1].lower() if "." in uploaded_file.name else ""
     if extension not in ALLOWED_IMAGE_EXTENSIONS:
-        return "❌ Image upload failed. Please try a different file (jpg, jpeg, or png only)."
+        return t("upload_type_error", lang)
     return None
 
 
 def _submit_claim_worker(
     claim_id: str,
     raw_input_text: str,
+    language: str,
     image_bytes: bytes | None,
     image_filename: str | None,
     image_content_type: str | None,
     result_holder: dict[str, Any],
 ) -> None:
+    lang = normalize_language(language)
     try:
-        data = {"claim_id": claim_id, "raw_input_text": raw_input_text}
+        data = {
+            "claim_id": claim_id,
+            "raw_input_text": raw_input_text,
+            "language": lang,
+        }
         files = None
         if image_bytes and image_filename:
             content_type = image_content_type or "image/jpeg"
@@ -479,11 +582,11 @@ def _submit_claim_worker(
 
         result_holder["data"] = response.json()
     except requests.ConnectionError:
-        result_holder["error"] = "⚠️ Backend not reachable. Please run 'make run' first."
+        result_holder["error"] = t("backend_unreachable", lang)
     except requests.Timeout:
-        result_holder["error"] = "Request timed out while processing the claim. Please try again."
+        result_holder["error"] = t("timeout_error", lang)
     except requests.RequestException as exc:
-        result_holder["error"] = f"Network error: {exc}"
+        result_holder["error"] = t("network_error", lang, exc)
 
 
 def fetch_claim_detail(claim_id: str) -> dict[str, Any] | None:
@@ -500,6 +603,7 @@ def submit_review_decision_api(
     claim_id: str,
     decision: str,
     analyst_notes: str,
+    lang: Language,
 ) -> tuple[bool, dict[str, Any] | str]:
     """POST human decision to the review API. Returns (success, response_or_error)."""
     url = DECISION_URL_TEMPLATE.format(claim_id=claim_id)
@@ -512,18 +616,18 @@ def submit_review_decision_api(
     try:
         response = requests.post(url, json=payload, headers=_api_headers(), timeout=15)
     except requests.ConnectionError:
-        return False, "⚠️ Backend not reachable. Please run 'make run' first."
+        return False, t("backend_unreachable", lang)
     except requests.Timeout:
-        return False, "Request timed out while recording the decision. Please try again."
+        return False, t("timeout_error", lang)
     except requests.RequestException as exc:
-        return False, f"Network error: {exc}"
+        return False, t("network_error", lang, exc)
 
     if response.status_code == 404:
-        return False, "Claim not found. Submit the claim before recording a decision."
+        return False, t("claim_not_found", lang)
     if response.status_code >= 400:
         detail = response.json().get("detail", response.text) if response.content else response.text
         if response.status_code == 409 and "already recorded" in str(detail).lower():
-            return False, "Decision already recorded for this claim."
+            return False, t("decision_already_api", lang)
         return False, str(detail)
 
     return True, response.json()
@@ -548,16 +652,16 @@ def _is_awaiting_human_decision(result: dict[str, Any], detail: dict[str, Any] |
     return str(result.get("status", "")).upper() == "HUMAN_REVIEW"
 
 
-def _render_decision_receipt(receipt: dict[str, Any]) -> None:
-    st.markdown("#### 🧾 Decision Receipt")
+def _render_decision_receipt(receipt: dict[str, Any], lang: Language) -> None:
+    st.markdown(f"#### 🧾 {t('decision_receipt', lang)}")
     st.markdown(
         f"""
         <div class="cf-card" style="border-left: 4px solid #FF6A00;">
-            <strong>Claim:</strong> {receipt.get("claim_id", "—")}<br/>
-            <strong>Decision:</strong> {receipt.get("decision", "—")}<br/>
-            <strong>Analyst:</strong> {receipt.get("analyst_id", ANALYST_ID)}<br/>
-            <strong>Recorded at:</strong> {receipt.get("timestamp", "—")}<br/>
-            <strong>Notes:</strong> {receipt.get("notes") or "(no notes)"}
+            <strong>{t("receipt_claim", lang)}</strong> {receipt.get("claim_id", "—")}<br/>
+            <strong>{t("receipt_decision", lang)}</strong> {receipt.get("decision", "—")}<br/>
+            <strong>{t("receipt_analyst", lang)}</strong> {receipt.get("analyst_id", ANALYST_ID)}<br/>
+            <strong>{t("receipt_recorded", lang)}</strong> {receipt.get("timestamp", "—")}<br/>
+            <strong>{t("receipt_notes", lang)}</strong> {receipt.get("notes") or t("no_notes", lang)}
         </div>
         """,
         unsafe_allow_html=True,
@@ -572,33 +676,35 @@ def _full_payload(result: dict[str, Any], detail: dict[str, Any] | None) -> dict
     return result
 
 
-def _weather_verification_label(payload: dict[str, Any]) -> str:
+def _weather_verification_label(payload: dict[str, Any], lang: Language) -> str:
     weather = payload.get("weather_verification")
     extracted = payload.get("extracted_data") or {}
 
     if not weather:
-        return "— Not checked"
+        return t("not_checked", lang)
 
     if weather.get("error"):
-        return "✗ Mismatch"
+        return t("mismatch", lang)
 
     damage_type = str(extracted.get("tipo_dano", "")).upper()
     had_rain = bool(weather.get("had_heavy_rain"))
     had_wind = bool(weather.get("had_strong_winds"))
 
     if damage_type == "AGUA" and had_rain:
-        return "✓ Match"
+        return t("match", lang)
     if damage_type == "VENTO" and had_wind:
-        return "✓ Match"
+        return t("match", lang)
     if damage_type in {"AGUA", "VENTO"} and not had_rain and not had_wind:
-        return "✗ Mismatch"
+        return t("mismatch", lang)
     if damage_type == "FOGO" and (had_rain or had_wind):
-        return "✗ Mismatch"
+        return t("mismatch", lang)
 
-    return "✓ Match"
+    return t("match", lang)
 
 
-def _collect_inconsistencies(result: dict[str, Any], detail: dict[str, Any] | None) -> list[str]:
+def _collect_inconsistencies(
+    result: dict[str, Any], detail: dict[str, Any] | None, lang: Language
+) -> list[str]:
     inconsistencies: list[str] = []
     seen: set[str] = set()
 
@@ -623,52 +729,43 @@ def _collect_inconsistencies(result: dict[str, Any], detail: dict[str, Any] | No
     payload = _full_payload(result, detail)
     weather = payload.get("weather_verification") or {}
     if weather.get("error"):
-        _add(
-            f"❌ Weather verification failed: "
-            f"{weather.get('message', weather.get('error'))}"
-        )
-    elif weather and _weather_verification_label(payload) == "✗ Mismatch":
+        _add(t("weather_failed", lang, weather.get("message", weather.get("error"))))
+    elif weather and _weather_verification_label(payload, lang) == t("mismatch", lang):
         summary = weather.get("summary", "Weather data does not support the reported incident.")
-        _add(f"❌ Weather mismatch: {summary}")
+        _add(t("weather_mismatch", lang, summary))
 
     if not (result.get("extracted_data") or {}):
-        _add("❌ Insufficient structured data extracted from claim text.")
+        _add(t("reason_empty_extraction", lang))
 
     if result.get("consistency_score") is not None:
         score = float(result["consistency_score"])
         if score < 0.5:
-            _add("❌ Low consistency between claim text and uploaded image.")
+            _add(t("low_consistency", lang))
 
     return inconsistencies
 
 
-def _render_data_quality_warnings(result: dict[str, Any], detail: dict[str, Any] | None) -> None:
+def _render_data_quality_warnings(
+    result: dict[str, Any], detail: dict[str, Any] | None, lang: Language
+) -> None:
     payload = _full_payload(result, detail)
 
     if not (result.get("extracted_data") or {}):
-        st.warning(
-            "⚠️ AI could not extract structured data. Manual review required.",
-            icon="⚠️",
-        )
+        st.warning(t("insufficient_data", lang), icon="⚠️")
 
     had_image = bool(st.session_state.submitted_image_bytes) or bool(payload.get("image_path"))
     if had_image and not result.get("image_analysis"):
-        st.warning(
-            "👁️ Image analysis unavailable. Consistency check skipped.",
-            icon="👁️",
-        )
+        st.warning(t("image_unavailable", lang), icon="👁️")
 
     raw_input = payload.get("raw_input", "")
     weather_keywords = ("chuva", "tempestade", "vento", "storm", "rain")
     mentions_weather = any(k in raw_input.lower() for k in weather_keywords)
     if mentions_weather and not payload.get("weather_verification"):
-        st.warning(
-            "🌦️ Weather verification unavailable. Climate-based fraud detection disabled.",
-            icon="🌦️",
-        )
+        st.warning(t("weather_unavailable", lang), icon="🌦️")
 
 
 def _run_processing_flow(submission: dict[str, Any]) -> None:
+    lang = normalize_language(submission.get("language"))
     result_holder: dict[str, Any] = {"data": None, "error": None}
     start_time = time.time()
     node_timings: dict[str, float] = {}
@@ -678,6 +775,7 @@ def _run_processing_flow(submission: dict[str, Any]) -> None:
         kwargs={
             "claim_id": submission["claim_id"],
             "raw_input_text": submission["raw_input_text"],
+            "language": lang,
             "image_bytes": submission.get("image_bytes"),
             "image_filename": submission.get("image_filename"),
             "image_content_type": submission.get("image_content_type"),
@@ -687,18 +785,40 @@ def _run_processing_flow(submission: dict[str, Any]) -> None:
     )
     worker.start()
 
-    with st.status("🔍 AI Agent Processing Pipeline", expanded=True) as status:
-        for index, (emoji, label, node_key) in enumerate(PROCESSING_STEPS):
+    with st.status(t("pipeline_status", lang), expanded=True) as status:
+        st.write(f"📡 **{t('receiving_data', lang)}**")
+        progress = st.progress(0, text=t("pipeline_status", lang))
+        steps = _processing_steps(lang)
+        total = len(steps)
+
+        for index, (emoji, label, node_key) in enumerate(steps):
             step_start = time.time()
             if worker.is_alive() or index == 0:
-                time.sleep(1.2)
+                time.sleep(1.0)
             node_timings[node_key] = round(time.time() - step_start, 2)
             st.write(f"{emoji} **{label}** — _{node_timings[node_key]:.1f}s_")
+            progress.progress(
+                int((index + 1) / total * 100),
+                text=f"{label} ({index + 1}/{total})",
+            )
 
         worker.join(timeout=300)
         elapsed = round(time.time() - start_time, 2)
-        status.update(label=f"✅ Pipeline complete in {elapsed}s", state="complete")
 
+        if result_holder.get("error"):
+            progress.progress(100, text=t("pipeline_complete", lang, elapsed))
+            status.update(
+                label=str(result_holder["error"]),
+                state="error",
+                expanded=True,
+            )
+        else:
+            progress.progress(100, text=t("pipeline_complete", lang, elapsed))
+            status.update(
+                label=t("pipeline_complete", lang, elapsed),
+                state="complete",
+                expanded=False,
+            )
     st.session_state.processing_elapsed = round(time.time() - start_time, 2)
     st.session_state.node_timings = node_timings
 
@@ -729,78 +849,79 @@ def _risk_delta(fraud_score: float) -> tuple[str, str]:
 
 
 def _render_result_card(result: dict[str, Any], detail: dict[str, Any] | None) -> None:
+    lang = _lang()
     fraud_score = float(result.get("fraud_risk_score", 0.0))
     is_high_risk = fraud_score > FRAUD_HIGH_RISK_THRESHOLD
-    inconsistencies = _collect_inconsistencies(result, detail)
+    inconsistencies = _collect_inconsistencies(result, detail, lang)
     payload = _full_payload(result, detail)
 
-    _render_data_quality_warnings(result, detail)
+    _render_data_quality_warnings(result, detail, lang)
 
     st.markdown(
-        '<div class="cf-card"><div class="cf-card-title">🔍 Risk Assessment</div>',
+        f'<div class="cf-card"><div class="cf-card-title">{t("risk_assessment_title", lang)}</div>',
         unsafe_allow_html=True,
     )
 
     if is_high_risk:
         st.markdown('<div class="risk-high">', unsafe_allow_html=True)
-        st.error("### ⚠️ HIGH FRAUD RISK DETECTED")
+        st.error(f"### {t('high_risk_title', lang)}")
         if inconsistencies:
-            st.markdown("**Evidence of inconsistencies:**")
+            st.markdown(f"**{t('high_risk_desc', lang)}**")
             for item in inconsistencies:
                 st.markdown(f"- {item}")
         else:
-            st.markdown(
-                "The AI agent flagged this claim for manual review due to elevated fraud risk."
-            )
+            st.markdown(t("flagged_for_review", lang))
         st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.markdown('<div class="risk-low">', unsafe_allow_html=True)
-        st.success("### ✅ LOW RISK — AUTO-APPROVED")
-        st.markdown("The claim passed automated checks and is eligible for payment approval.")
+        st.success(f"### {t('low_risk_title', lang)}")
+        st.markdown(t("low_risk_desc", lang))
         st.markdown("</div>", unsafe_allow_html=True)
 
     metric_main, metric_side = st.columns([2, 1])
     fraud_delta, delta_color = _risk_delta(fraud_score)
     consistency = result.get("consistency_score")
-    weather_label = _weather_verification_label(payload)
+    weather_label = _weather_verification_label(payload, lang)
 
     with metric_main:
         st.metric(
-            "Fraud Risk Score",
+            t("fraud_risk_score", lang),
             f"{fraud_score * 100:.0f}%",
             delta=fraud_delta,
             delta_color=delta_color,  # type: ignore[arg-type]
             help="LLM-assessed probability of fraudulent intent (0–100%).",
         )
-        st.caption("🔍 Higher scores indicate stronger fraud signals from the AI agent.")
+        st.caption(f"🔍 {t('higher_scores_note', lang)}")
 
     with metric_side:
         st.metric(
-            "Consistency",
+            t("consistency_score", lang),
             f"{float(consistency) * 100:.0f}%" if consistency is not None else "N/A",
             help="Text-vs-image damage type alignment score.",
         )
         st.metric(
-            "Weather",
+            t("weather_verification", lang),
             weather_label,
             help="Open-Meteo historical verification against reported incident.",
         )
         if st.session_state.processing_elapsed:
-            st.metric("Processing Time", f"{st.session_state.processing_elapsed:.1f}s")
+            st.metric(t("processing_time", lang), f"{st.session_state.processing_elapsed:.1f}s")
 
     if st.session_state.submitted_image_bytes:
-        st.markdown("**📎 Evidence — Submitted Image**")
+        st.markdown(f"**{t('evidence_image', lang)}**")
         st.image(
             st.session_state.submitted_image_bytes,
-            caption=f"Claim {result.get('claim_id', '')} — damage photo",
-            use_container_width=True,
+            caption=t("damage_photo_caption", lang, result.get("claim_id", "")),
+            width="stretch",
         )
 
     st.markdown("</div>", unsafe_allow_html=True)
-    _render_technical_details(result, detail)
+    _render_technical_details(result, detail, lang)
 
 
-def _render_technical_details(result: dict[str, Any], detail: dict[str, Any] | None) -> None:
+def _render_technical_details(
+    result: dict[str, Any], detail: dict[str, Any] | None, lang: Language
+) -> None:
     payload = _full_payload(result, detail)
     tools_called: list[str] = []
     if payload.get("image_analysis"):
@@ -811,34 +932,36 @@ def _render_technical_details(result: dict[str, Any], detail: dict[str, Any] | N
         if tool not in tools_called:
             tools_called.append(tool)
 
-    with st.expander("🔧 View Technical Details", expanded=False):
-        st.markdown("**Tools invoked**")
+    with st.expander(t("technical_details", lang), expanded=False):
+        st.markdown(f"**{t('tools_invoked', lang)}**")
         if tools_called:
             for tool in tools_called:
                 st.markdown(f"- `{tool}`")
         else:
-            st.caption("No external tools were invoked for this claim.")
+            st.caption(t("no_tools", lang))
 
         if st.session_state.node_timings:
-            st.markdown("**Simulated node timing (demo)**")
+            st.markdown(f"**{t('node_timing', lang)}**")
             for node, duration in st.session_state.node_timings.items():
                 st.markdown(f"- `{node}`: {duration}s")
 
-        st.markdown("**Raw API response**")
+        st.markdown(f"**{t('raw_api_response', lang)}**")
         st.json(result)
         if detail:
-            st.markdown("**Persisted claim snapshot**")
+            st.markdown(f"**{t('persisted_snapshot', lang)}**")
             st.json(detail)
 
 
-def _record_decision(claim_id: str, decision: str, notes: str) -> bool:
-    with st.spinner("Recording analyst decision..."):
-        success, result = submit_review_decision_api(claim_id, decision, notes)
-
-    if not success:
-        st.session_state.decision_error = str(result)
-        st.error(str(result))
-        return False
+def _record_decision(claim_id: str, decision: str, notes: str, lang: Language) -> bool:
+    with st.status(t("recording_decision", lang), expanded=True) as status:
+        st.write(t("recording_decision", lang))
+        success, result = submit_review_decision_api(claim_id, decision, notes, lang)
+        if not success:
+            status.update(label=str(result), state="error", expanded=True)
+            st.session_state.decision_error = str(result)
+            st.error(str(result))
+            return False
+        status.update(label=t("decision_toast", lang), state="complete", expanded=False)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     api_decided_at = result.get("decided_at")
@@ -849,7 +972,7 @@ def _record_decision(claim_id: str, decision: str, notes: str) -> bool:
         "timestamp": timestamp,
         "claim_id": claim_id,
         "decision": result.get("status", decision),
-        "notes": notes or result.get("reviewer_note") or "(no notes)",
+        "notes": notes or result.get("reviewer_note") or t("no_notes", lang),
         "analyst_id": result.get("analyst_id", ANALYST_ID),
         "api_response": result,
     }
@@ -880,21 +1003,22 @@ def _record_decision(claim_id: str, decision: str, notes: str) -> bool:
             payload["graph_interrupted"] = False
 
     logger.info("Human analyst decision recorded via API", extra=entry)
-    st.toast("Decision recorded successfully", icon="✅")
+    st.toast(t("decision_toast", lang), icon="✅")
     return True
 
 
-def _reset_demo_decision_state() -> None:
+def _reset_demo_decision_state(lang: Language) -> None:
     st.session_state.human_decision = None
     st.session_state.decision_receipt = None
     st.session_state.decision_error = None
     st.session_state.pending_confirmation = None
     st.session_state.analyst_notes = ""
     st.session_state.analyst_override = False
-    st.toast("Decision state cleared for demo", icon="🔄")
+    st.toast(t("reset_toast", lang), icon="🔄")
 
 
 def _render_human_actions(result: dict[str, Any]) -> None:
+    lang = _lang()
     fraud_score = float(result.get("fraud_risk_score", 0.0))
     is_low_risk = fraud_score <= FRAUD_HIGH_RISK_THRESHOLD
     claim_id = result.get("claim_id", st.session_state.claim_id)
@@ -903,104 +1027,100 @@ def _render_human_actions(result: dict[str, Any]) -> None:
     awaiting = _is_awaiting_human_decision(result, st.session_state.claim_detail)
 
     st.markdown(
-        '<div class="cf-card"><div class="cf-card-title">🛡️ Human-in-the-Loop Decision</div>',
+        f'<div class="cf-card"><div class="cf-card-title">{t("hitl_title", lang)}</div>',
         unsafe_allow_html=True,
     )
-    st.caption(
-        "Regulatory checkpoint: a licensed analyst must confirm or override the AI recommendation."
-    )
+    st.caption(t("hitl_caption", lang))
 
     status_color = {
         "APPROVED": "green",
         "REJECTED": "red",
         "PENDING REVIEW": "orange",
     }.get(status_label, "blue")
-    st.markdown(f"**Current status:** :{status_color}[{status_label}]")
+    st.markdown(f"**{t('current_status', lang)}** :{status_color}[{status_label}]")
 
     if awaiting and not decision_made:
-        st.warning(
-            "⏳ **Waiting for human decision…**\n\n"
-            "LangGraph is **paused** at `interrupt_before=['human_review']`. "
-            "Submitting Approve/Reject calls `update_state` + resume on the API."
-        )
+        st.warning(t("waiting_human", lang))
 
     if st.session_state.decision_error and not decision_made:
         st.error(st.session_state.decision_error)
 
     if decision_made:
-        st.info("✅ Decision already recorded. LangGraph resumed and buttons are disabled.")
+        st.info(t("decision_already_recorded", lang))
         if st.session_state.decision_receipt:
-            _render_decision_receipt(st.session_state.decision_receipt)
-        if st.button("🔄 Reset for Demo", use_container_width=True, key="reset_demo_decision"):
-            _reset_demo_decision_state()
+            _render_decision_receipt(st.session_state.decision_receipt, lang)
+        if st.button(t("reset_demo", lang), width="stretch", key="reset_demo_decision"):
+            _reset_demo_decision_state(lang)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
     if not awaiting and not decision_made:
-        st.caption(
-            "This claim finished automatically (approval/rejection). "
-            "HITL controls appear when the graph pauses for review."
-        )
+        st.caption(t("auto_finished_caption", lang))
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    st.session_state.analyst_notes = st.text_area(
-        "Analyst notes",
-        value=st.session_state.analyst_notes,
-        height=100,
-        placeholder="Document your reasoning for audit compliance...",
-        key="analyst_notes_input",
-    )
-
-    if not is_low_risk:
-        st.session_state.analyst_override = st.checkbox(
-            "Analyst override — approve despite high fraud risk",
-            value=st.session_state.analyst_override,
-            help="Required to enable approval when fraud risk exceeds 70%.",
+    with st.form("hitl_decision_form", border=False, clear_on_submit=False):
+        notes = st.text_area(
+            t("analyst_notes_label", lang),
+            value=st.session_state.analyst_notes,
+            height=100,
+            placeholder=t("analyst_notes_placeholder", lang),
         )
 
-    approve_enabled = is_low_risk or st.session_state.analyst_override
-    action_cols = st.columns(2)
+        override = st.session_state.analyst_override
+        if not is_low_risk:
+            override = st.checkbox(
+                t("analyst_override", lang),
+                value=st.session_state.analyst_override,
+                help=t("analyst_override_help", lang),
+            )
 
-    with action_cols[0]:
-        st.markdown('<div class="approve-btn">', unsafe_allow_html=True)
-        if st.button(
-            "✅ Approve Payment",
-            disabled=not approve_enabled,
-            use_container_width=True,
-            key="approve_payment",
-        ):
-            st.session_state.pending_confirmation = "APPROVED"
-        st.markdown("</div>", unsafe_allow_html=True)
+        approve_enabled = is_low_risk or override
+        action_cols = st.columns(2)
+        with action_cols[0]:
+            st.markdown('<div class="approve-btn">', unsafe_allow_html=True)
+            approve_clicked = st.form_submit_button(
+                t("approve_button", lang),
+                disabled=not approve_enabled,
+                width="stretch",
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with action_cols[1]:
+            st.markdown('<div class="reject-btn">', unsafe_allow_html=True)
+            reject_clicked = st.form_submit_button(
+                t("reject_button", lang),
+                width="stretch",
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    with action_cols[1]:
-        st.markdown('<div class="reject-btn">', unsafe_allow_html=True)
-        if st.button("❌ Reject & Investigate", use_container_width=True, key="reject_claim"):
-            st.session_state.pending_confirmation = "REJECTED"
-        st.markdown("</div>", unsafe_allow_html=True)
+    if approve_clicked or reject_clicked:
+        st.session_state.analyst_notes = notes
+        st.session_state.analyst_override = override
+        st.session_state.pending_confirmation = (
+            "APPROVED" if approve_clicked else "REJECTED"
+        )
 
     pending = st.session_state.pending_confirmation
     if pending:
-        st.warning(f"⚠️ Confirm you want to mark claim **{claim_id}** as **{pending}**?")
+        st.warning(t("confirm_decision", lang, claim_id, pending))
         confirm_cols = st.columns(2)
         with confirm_cols[0]:
             if st.button(
-                "Yes, confirm decision",
+                t("yes_confirm", lang),
                 type="primary",
-                use_container_width=True,
-            ) and _record_decision(claim_id, pending, st.session_state.analyst_notes):
-                st.success(
-                    f"Decision recorded. Claim {claim_id} marked as {pending} by human analyst."
-                )
+                width="stretch",
+                key="confirm_hitl_yes",
+            ) and _record_decision(claim_id, pending, st.session_state.analyst_notes, lang):
+                st.success(t("decision_success", lang, claim_id, pending))
                 st.rerun()
         with confirm_cols[1]:
-            if st.button("Cancel", use_container_width=True):
+            if st.button(t("cancel", lang), width="stretch", key="confirm_hitl_cancel"):
                 st.session_state.pending_confirmation = None
                 st.rerun()
 
     if st.session_state.audit_trail:
-        st.markdown("**Decision Audit Trail (this session)**")
+        st.markdown(f"**{t('audit_trail', lang)}**")
         for entry in st.session_state.audit_trail[:5]:
             st.markdown(
                 f'<div class="audit-entry">'
@@ -1019,14 +1139,15 @@ def _handle_submit(
     raw_input_text: str,
     uploaded_image: Any,
 ) -> None:
+    lang = _lang()
     if not check_backend_health():
-        st.error("⚠️ Backend not reachable. Please run 'make run' first.")
+        st.error(t("backend_unreachable", lang))
         return
     if not raw_input_text or not raw_input_text.strip():
-        st.error("Please provide an incident description before submitting.")
+        st.error(t("empty_description_error", lang))
         return
 
-    image_error = _validate_image(uploaded_image)
+    image_error = _validate_image(uploaded_image, lang)
     if image_error:
         st.error(image_error)
         return
@@ -1038,7 +1159,7 @@ def _handle_submit(
     if uploaded_image is not None:
         image_bytes = uploaded_image.getvalue()
         if not image_bytes:
-            st.error("❌ Image upload failed. Please try a different file.")
+            st.error(t("upload_failed", lang))
             return
         image_filename = uploaded_image.name
         image_content_type = uploaded_image.type
@@ -1048,6 +1169,7 @@ def _handle_submit(
     st.session_state.pending_submission = {
         "claim_id": st.session_state.claim_id,
         "raw_input_text": raw_input_text.strip(),
+        "language": lang,
         "image_bytes": image_bytes,
         "image_filename": image_filename,
         "image_content_type": image_content_type,
@@ -1065,49 +1187,58 @@ def _handle_submit(
 
 
 def _render_submission_form() -> None:
+    lang = _lang()
+    processing = bool(st.session_state.processing)
+
     st.markdown(
-        '<div class="cf-card"><div class="cf-card-title">📧 Customer Portal</div>',
+        f'<div class="cf-card"><div class="cf-card-title">{t("customer_portal_title", lang)}</div>',
         unsafe_allow_html=True,
     )
-    st.caption("Submit a new insurance claim for AI-powered triage and fraud analysis.")
+    st.caption(t("customer_portal_caption", lang))
 
-    claim_id = st.text_input(
-        "Claim ID",
-        value=st.session_state.input_claim_id,
-        key="input_claim_id",
-    )
-    raw_input_text = st.text_area(
-        "Incident description",
-        value=st.session_state.input_raw_text,
-        height=160,
-        placeholder=(
-            "Describe the incident (e.g., 'My roof was damaged by yesterday's storm "
-            "in São Paulo...')"
-        ),
-        key="input_raw_text",
-    )
-    uploaded_image = st.file_uploader(
-        "Upload damage photo",
-        type=["jpg", "jpeg", "png"],
-        key="input_image",
-    )
+    if processing:
+        st.info(t("pipeline_status", lang))
 
-    if st.button(
-        "🚀 Submit Claim for AI Analysis",
-        type="primary",
-        use_container_width=True,
-    ):
+    # Batch inputs: typing does not rerun the app until form submit.
+    with st.form("claim_submission_form", border=False, clear_on_submit=False):
+        claim_id = st.text_input(
+            t("claim_id_label", lang),
+            key="input_claim_id",
+            disabled=processing,
+        )
+        raw_input_text = st.text_area(
+            t("claim_text_label", lang),
+            height=160,
+            placeholder=t("claim_text_placeholder", lang),
+            key="input_raw_text",
+            disabled=processing,
+        )
+        uploaded_image = st.file_uploader(
+            t("upload_label", lang),
+            type=["jpg", "jpeg", "png"],
+            key="input_image",
+            disabled=processing,
+        )
+        submitted = st.form_submit_button(
+            t("submit_button", lang),
+            type="primary",
+            width="stretch",
+            disabled=processing,
+        )
+
+    if submitted and not processing:
         _handle_submit(claim_id, raw_input_text, uploaded_image)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_analyst_panel() -> None:
+    lang = _lang()
     st.markdown(
-        '<div class="cf-card"><div class="cf-card-title">🔍 Fraud Analyst Dashboard</div>',
+        f'<div class="cf-card"><div class="cf-card-title">{t("analyst_panel_title", lang)}</div>',
         unsafe_allow_html=True,
     )
-    st.caption("Real-time LangGraph pipeline execution and risk decision support.")
+    st.caption(t("analyst_panel_caption", lang))
 
     if st.session_state.processing and st.session_state.pending_submission:
         _run_processing_flow(st.session_state.pending_submission)
@@ -1118,17 +1249,7 @@ def _render_analyst_panel() -> None:
     elif st.session_state.submit_error:
         st.error(st.session_state.submit_error)
     elif not st.session_state.processing:
-        st.markdown(
-            """
-            **Awaiting claim submission**
-
-            The analyst dashboard will display:
-            - Live LangGraph node execution via `st.status()`
-            - Fraud risk, consistency, and weather verification metrics
-            - Evidence thumbnails and technical audit trail
-            - Human-in-the-loop approve / reject controls
-            """
-        )
+        st.markdown(f"**{t('awaiting_submission', lang)}**\n\n{t('awaiting_submission_details', lang)}")
 
     st.markdown("</div>", unsafe_allow_html=True)
 

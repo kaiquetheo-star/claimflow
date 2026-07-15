@@ -10,6 +10,7 @@ from dashscope import AioMultiModalConversation
 from pydantic import ValidationError
 
 from claimflow.core.config import Settings, get_settings
+from claimflow.core.i18n import Language, normalize_language
 from claimflow.core.logging import get_logger
 from claimflow.models.schemas import ImageAnalysisResult
 from claimflow.services.llm_service import is_model_access_error
@@ -65,23 +66,47 @@ DAMAGE_KEYWORDS: dict[str, frozenset[str]] = {
 }
 
 VISION_SYSTEM_PROMPT = """\
-Você é um perito em sinistros de seguros residenciais especializado em análise visual.
-Analise a imagem fornecida e compare com o relato textual do segurado.
+You are ClaimFlow Vision, a senior insurance claims visual analyst.
 
-Suas tarefas:
-1. Descrever o que vê na imagem: tipo de dano aparente, severidade visual e localização.
-2. Comparar a imagem com o relato textual fornecido.
-3. Identificar inconsistências entre texto e imagem.
+CRITICAL LANGUAGE RULE: You MUST respond in {language_name}. All free-text \
+field values in your JSON output must be in this language.
 
-Responda EXCLUSIVAMENTE com um objeto JSON válido (sem markdown) no formato:
-{
+Your tasks:
+1. Describe what you see: apparent damage type, visual severity, and location cues.
+2. Compare the image with the policyholder's textual report.
+3. Identify inconsistencies between text and image.
+
+Respond EXCLUSIVELY with a valid JSON object (no markdown) in this format:
+{{
   "detected_damage_type": "AGUA|FOGO|VENTO|OUTRO",
   "visual_severity": "baixa|media|alta|critica",
   "location_match": true,
-  "description": "descrição detalhada em português",
-  "inconsistencies": ["lista de inconsistências encontradas, ou array vazio"]
-}
+  "description": "detailed visual description in {language_name}",
+  "inconsistencies": ["list of inconsistencies in {language_name}, or empty array"]
+}}
+
+Be precise. Report only what is visible. Do not invent damage that is not in the image.
 """
+
+_LANGUAGE_NAMES: dict[str, str] = {
+    "en": "English",
+    "pt": "Portuguese",
+    "es": "Spanish",
+}
+
+
+def get_vision_system_prompt(language: str = "en") -> str:
+    """Build the Qwen-VL system prompt forcing output in the selected language.
+
+    Defaults to English for the Alibaba Cloud hackathon.
+    """
+    language_name = _LANGUAGE_NAMES.get(normalize_language(language), "English")
+    return VISION_SYSTEM_PROMPT.format(language_name=language_name)
+
+
+def vision_system_prompt(lang: Language = "en") -> str:
+    """Backwards-compatible alias for :func:`get_vision_system_prompt`."""
+    return get_vision_system_prompt(lang)
 
 
 class VisionServiceError(Exception):
@@ -113,12 +138,18 @@ class VisionService:
             return True
         return is_model_access_error(Exception(f"{code}: {message}"))
 
-    async def analyze_claim_image(self, image_path: str, context_text: str) -> dict:
+    async def analyze_claim_image(
+        self,
+        image_path: str,
+        context_text: str,
+        language: Language | str = "en",
+    ) -> dict:
         """Analyse a claim image and cross-validate it against the textual report.
 
         Args:
             image_path: Absolute or relative path to the image on local disk.
             context_text: Raw claim text used for cross-validation.
+            language: Output language for free-text fields (default: English).
 
         Returns:
             Serialised :class:`ImageAnalysisResult` as a plain dict.
@@ -130,16 +161,17 @@ class VisionService:
         path = Path(image_path)
         self._validate_image_path(path)
 
+        lang = normalize_language(language)
         log = logger
         image_ref = str(path.resolve())
         user_prompt = (
-            f"Relato textual do sinistro:\n\n{context_text}\n\n"
-            "Analise a imagem anexa e retorne o JSON solicitado."
+            f"Claim textual report:\n\n{context_text}\n\n"
+            "Analyse the attached image and return the requested JSON."
         )
         messages = [
             {
                 "role": "system",
-                "content": [{"text": VISION_SYSTEM_PROMPT}],
+                "content": [{"text": get_vision_system_prompt(lang)}],
             },
             {
                 "role": "user",
@@ -184,7 +216,7 @@ class VisionService:
                 )
                 if index < len(models) - 1:
                     continue
-                return self._return_mock_analysis(context_text, errors)
+                return self._return_mock_analysis(context_text, errors, lang)
             except Exception as exc:
                 VisionServiceError(f"Vision API call failed: {exc}")
                 if (is_model_access_error(exc) or isinstance(exc, TimeoutError)) and index < len(
@@ -203,7 +235,7 @@ class VisionService:
                 errors.append(f"{model}: {exc}")
                 if index < len(models) - 1:
                     continue
-                return self._return_mock_analysis(context_text, errors)
+                return self._return_mock_analysis(context_text, errors, lang)
 
             try:
                 raw_text = self._extract_response_text(response)
@@ -218,7 +250,7 @@ class VisionService:
                 errors.append(f"{model}: {exc}")
                 if index < len(models) - 1:
                     continue
-                return self._return_mock_analysis(context_text, errors)
+                return self._return_mock_analysis(context_text, errors, lang)
 
             result = self._parse_analysis_result(raw_text)
 
@@ -240,38 +272,105 @@ class VisionService:
             )
             return result
 
-        return self._return_mock_analysis(context_text, errors)
+        return self._return_mock_analysis(context_text, errors, lang)
 
     @staticmethod
-    def build_mock_analysis(context_text: str) -> dict:
-        """Return a realistic offline vision analysis simulating water damage."""
+    def build_mock_analysis(
+        context_text: str,
+        language: Language | str = "en",
+    ) -> dict:
+        """Return a realistic offline vision analysis simulating water damage.
+
+        Free-text fields follow ``language`` (default English) so English UI
+        mode never surfaces Portuguese mock copy.
+        """
+        lang = normalize_language(language)
         text_lower = context_text.lower()
-        inconsistencies = [
-            "Texto relata incêndio/fogo, imagem mostra vazamento e infiltração de água.",
-        ]
-        if any(word in text_lower for word in ("chuva", "tempestade", "vendaval")):
-            inconsistencies.append(
-                "Relato menciona evento climático severo, mas imagem indica apenas dano por água."
-            )
+
+        fire_words = ("fire", "incêndio", "incendio", "fogo", "queim", "kitchen caught")
+        weather_words = (
+            "chuva",
+            "tempestade",
+            "vendaval",
+            "storm",
+            "rain",
+            "wind",
+            "vento",
+            "tormenta",
+        )
+
+        texts: dict[Language, dict[str, str]] = {
+            "en": {
+                "description": (
+                    "Mock image: extensive moisture stains, soaked flooring and "
+                    "paint bubbling indicating a water leak."
+                ),
+                "fire_mismatch": (
+                    "Text reports fire damage; image shows water leak and infiltration."
+                ),
+                "weather_mismatch": (
+                    "Report mentions a severe weather event, but the image indicates "
+                    "water damage only."
+                ),
+            },
+            "pt": {
+                "description": (
+                    "Imagem mock: manchas extensas de umidade, piso encharcado e "
+                    "bolhas na pintura indicando vazamento de água."
+                ),
+                "fire_mismatch": (
+                    "Texto relata incêndio/fogo, imagem mostra vazamento e "
+                    "infiltração de água."
+                ),
+                "weather_mismatch": (
+                    "Relato menciona evento climático severo, mas imagem indica "
+                    "apenas dano por água."
+                ),
+            },
+            "es": {
+                "description": (
+                    "Imagen mock: manchas extensas de humedad, piso empapado y "
+                    "pintura con burbujas indicando una fuga de agua."
+                ),
+                "fire_mismatch": (
+                    "El texto reporta incendio/fuego; la imagen muestra fuga e "
+                    "infiltración de agua."
+                ),
+                "weather_mismatch": (
+                    "El relato menciona un evento climático severo, pero la imagen "
+                    "indica solo daño por agua."
+                ),
+            },
+        }
+        copy = texts[lang]
+
+        inconsistencies: list[str] = []
+        if any(word in text_lower for word in fire_words):
+            inconsistencies.append(copy["fire_mismatch"])
+        if any(word in text_lower for word in weather_words):
+            inconsistencies.append(copy["weather_mismatch"])
+
         return {
             "detected_damage_type": "AGUA",
             "visual_severity": "alta",
             "location_match": False,
-            "description": (
-                "Imagem mock: manchas extensas de umidade, piso encharcado e bolhas na pintura "
-                "indicando vazamento de água."
-            ),
+            "description": copy["description"],
             "inconsistencies": inconsistencies,
             "source": "mock",
         }
 
-    def _return_mock_analysis(self, context_text: str, errors: list[str]) -> dict:
+    def _return_mock_analysis(
+        self,
+        context_text: str,
+        errors: list[str],
+        language: Language | str = "en",
+    ) -> dict:
         """Log and return mock vision analysis after API failures."""
         logger.warning(
             "All Qwen-VL models failed; returning mock vision analysis",
             extra={"failed_models": errors},
         )
-        return self.build_mock_analysis(context_text)
+        return self.build_mock_analysis(context_text, language)
 
     def _validate_image_path(self, path: Path) -> None:
         """Ensure the image exists and has a supported file extension."""

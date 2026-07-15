@@ -1,5 +1,8 @@
 """FastAPI application entry point."""
 
+from __future__ import annotations
+
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
@@ -31,6 +34,26 @@ from claimflow.tools.factory import get_storage_client, reset_storage_client_cac
 logger = get_logger(__name__)
 
 
+def check_port_available(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True when nothing accepts TCP connections on ``host:port``."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) != 0
+
+
+def ensure_port_available(port: int) -> None:
+    """Raise a clear error when the configured listen port is already taken.
+
+    Called from ``run()`` / Makefile *before* uvicorn binds — not from lifespan,
+    because lifespan runs after the server has already claimed the port.
+    """
+    if not check_port_available(port):
+        raise RuntimeError(
+            f"Port {port} is already in use. "
+            f"Stop the other process or set CLAIMFLOW_PORT in .env"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI, settings: Settings | None = None) -> AsyncIterator[None]:
     """Manage application startup and shutdown lifecycle hooks.
@@ -43,6 +66,15 @@ async def lifespan(app: FastAPI, settings: Settings | None = None) -> AsyncItera
     """
     resolved = settings or getattr(app.state, "settings", None) or get_settings()
     setup_logging(resolved)
+
+    uses_postgres = bool(resolved.database_url)
+    logger.info("=" * 60)
+    logger.info("Claimflow Backend Starting")
+    logger.info("DATABASE_URL: %s", "SET" if uses_postgres else "NOT SET")
+    logger.info("Checkpoint: %s", "PostgreSQL" if uses_postgres else "InMemory")
+    logger.info("Claim Store: %s", "PostgreSQL" if uses_postgres else "InMemory")
+    logger.info("Port: %s", resolved.port)
+    logger.info("=" * 60)
 
     checkpoint_manager = CheckpointManager()
     database = Database()
@@ -69,6 +101,7 @@ async def lifespan(app: FastAPI, settings: Settings | None = None) -> AsyncItera
             "checkpoint_backend": checkpoint_manager.backend,
             "claim_store_backend": claim_store.backend,
             "use_mock_llm": resolved.use_mock_llm,
+            "port": resolved.port,
         },
     )
     if resolved.use_mock_llm:
@@ -164,10 +197,11 @@ app = create_app()
 def run() -> None:
     """CLI entry point: start the uvicorn ASGI server."""
     settings = get_settings()
+    ensure_port_available(settings.port)
     uvicorn.run(
         "claimflow.api.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=settings.port,
         reload=not settings.is_production,
         log_level=settings.log_level.lower(),
         factory=False,

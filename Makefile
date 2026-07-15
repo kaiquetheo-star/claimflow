@@ -9,6 +9,11 @@ PYTEST := $(VENV)/bin/pytest
 UVICORN := $(VENV)/bin/uvicorn
 STREAMLIT := $(VENV)/bin/streamlit
 ALEMBIC := $(VENV)/bin/alembic
+# Prefer CLAIMFLOW_PORT from the environment, then .env, then 8000.
+CLAIMFLOW_PORT ?= $(shell sed -n 's/^[[:space:]]*CLAIMFLOW_PORT=//p' .env 2>/dev/null | tail -1)
+ifeq ($(strip $(CLAIMFLOW_PORT)),)
+CLAIMFLOW_PORT := 8000
+endif
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -33,10 +38,15 @@ coverage: ## Run tests with coverage report (terminal + htmlcov/)
 	$(PYTEST) --cov=claimflow --cov-report=term-missing --cov-report=html -v
 
 run: ## Start the FastAPI development server
-	$(UVICORN) claimflow.api.main:app --reload --host 0.0.0.0 --port 8000 --app-dir src
+	@$(PYTHON) -c "import socket,sys; p=int('$(CLAIMFLOW_PORT)'); \
+s=socket.socket(); s.settimeout(0.5); busy=(s.connect_ex(('127.0.0.1',p))==0); s.close(); \
+sys.exit(0 if not busy else (print(f'Port {p} is already in use. Stop the other process or set CLAIMFLOW_PORT in .env') or 1))"
+	$(UVICORN) claimflow.api.main:app --reload --host 0.0.0.0 --port $(CLAIMFLOW_PORT) --app-dir src
+
+BACKEND_URL ?= http://localhost:8001
 
 run-frontend: ## Start the Streamlit demo dashboard
-	$(STREAMLIT) run streamlit_app.py --server.port 8501
+	BACKEND_URL="$(BACKEND_URL)" $(STREAMLIT) run streamlit_app.py --server.port 8501
 
 db-up: ## Start PostgreSQL via Docker Compose
 	docker compose up -d postgres

@@ -33,10 +33,12 @@ class ClaimAgentState(TypedDict, total=False):
         human_decision: Adjuster decision string (``APPROVED`` / ``REJECTED``) applied on resume.
         reviewer_note: Optional note from the human adjuster.
         analyst_id: Identifier of the adjuster who resumed the graph.
+        language: UI/LLM output language code (``en``, ``pt``, or ``es``). Defaults to English.
     """
 
     claim_id: str
     raw_input: str
+    language: str
     image_path: str | None
     extracted_data: dict[str, Any]
     image_analysis: dict[str, Any] | None

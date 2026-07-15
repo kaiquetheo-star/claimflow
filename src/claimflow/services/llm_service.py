@@ -11,6 +11,7 @@ from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_core.messages import AIMessage, BaseMessage
 
 from claimflow.core.config import Settings, get_settings
+from claimflow.core.i18n import get_request_language, normalize_language
 from claimflow.core.logging import get_logger
 from claimflow.models.agent_schemas import (
     RiskAssessmentResult,
@@ -21,6 +22,7 @@ from claimflow.models.agent_schemas import (
 from claimflow.services.mock_scenarios import (
     MockScenario,
     detect_mock_scenario,
+    get_mock_scenario_payload,
 )
 
 if TYPE_CHECKING:
@@ -39,6 +41,93 @@ MOCK_MODE_INFO_MESSAGE = (
 
 # Legacy alias kept for backward-compatible log filters.
 MOCK_SCENARIO_FRAUD_DETECTION = "FRAUD_CLAIM"
+
+_LANGUAGE_NAMES: dict[str, str] = {
+    "en": "English",
+    "pt": "Portuguese",
+    "es": "Spanish",
+}
+
+TRIAGE_SYSTEM_PROMPT = """\
+You are ClaimFlow, a senior insurance claims triage AI.
+
+CRITICAL LANGUAGE RULE: You MUST respond in {language_name}. All field values \
+in your JSON output must be in this language.
+
+Your task: Extract structured data from customer claim descriptions.
+
+OUTPUT FORMAT: Return JSON matching the TriageResult schema exactly.
+- cliente_nome: customer's full name (preserve original language)
+- tipo_dano: one of AGUA, FOGO, VENTO, OUTRO
+- localizacao: city/region mentioned
+- descricao_resumida: brief summary in {language_name}
+- data_incidente: ISO date if mentioned, else null
+
+Be precise. Extract only what is explicitly stated. Do not invent information.
+"""
+
+INVESTIGATION_SYSTEM_PROMPT = """\
+You are ClaimFlow, a senior insurance claims investigator.
+
+CRITICAL LANGUAGE RULE: You MUST respond in {language_name}. All free-text \
+fields (especially reasoning) must be in this language.
+
+Your task: Decide whether external weather verification is required.
+
+Rules:
+- If the report mentions weather events (rain, wind, storm, hail) AND provides \
+a location and date, you MUST call 'get_weather_history'.
+- Set requires_tool_call=True, tool_name='get_weather_history', and \
+tool_arguments={{"location": "...", "date": "..."}}.
+- Otherwise return requires_tool_call=False, tool_name='none', tool_arguments={{}}.
+- Explain your decision in reasoning (in {language_name}).
+- Keep enum/tool identifiers unchanged.
+
+Be precise. Do not invent locations or dates that are not in the claim text.
+"""
+
+RISK_SYSTEM_PROMPT = """\
+You are ClaimFlow, a senior insurance fraud analyst. Be sceptical and evidence-based.
+
+CRITICAL LANGUAGE RULE: You MUST respond in {language_name}. All free-text \
+fields (especially justificativa_risco) must be in this language.
+
+Your task: Assess fraud risk and severity for the structured claim.
+
+Guidelines:
+- Look for inconsistencies, exaggerations, omissions, and fraud patterns.
+- Consider visual analysis and text-image consistency when provided.
+- Consider weather verification when provided.
+- fraud_risk_score: probability of fraudulent intent (0.0 = none, 1.0 = extremely high).
+- severity_score: estimated financial/operational impact \
+(0.0 = trivial, 1.0 = catastrophic).
+- justificativa_risco: explain score drivers in {language_name}.
+- requires_human_review: true if any material doubt needs a human adjuster.
+- Do not approve claims; your job is risk assessment only.
+
+Be precise. Base conclusions only on provided evidence.
+"""
+
+
+def get_triage_system_prompt(language: str = "en") -> str:
+    """Build the triage system prompt forcing output in the selected language.
+
+    Defaults to English for the Alibaba Cloud hackathon.
+    """
+    language_name = _LANGUAGE_NAMES.get(normalize_language(language), "English")
+    return TRIAGE_SYSTEM_PROMPT.format(language_name=language_name)
+
+
+def get_investigation_system_prompt(language: str = "en") -> str:
+    """Build the investigation system prompt forcing output in the selected language."""
+    language_name = _LANGUAGE_NAMES.get(normalize_language(language), "English")
+    return INVESTIGATION_SYSTEM_PROMPT.format(language_name=language_name)
+
+
+def get_risk_system_prompt(language: str = "en") -> str:
+    """Build the risk-assessment system prompt forcing output in the selected language."""
+    language_name = _LANGUAGE_NAMES.get(normalize_language(language), "English")
+    return RISK_SYSTEM_PROMPT.format(language_name=language_name)
 
 _ACCESS_DENIED_MARKERS = (
     "403",
@@ -139,108 +228,96 @@ def _extract_message_text(messages: Sequence[BaseMessage | dict[str, Any]]) -> s
     return "\n".join(parts)
 
 
-def _build_storm_triage() -> TriageResult:
+def _parse_incident_date(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    return datetime.fromisoformat(text)
+
+
+def _build_triage_from_payload(payload: dict[str, Any]) -> TriageResult:
     return TriageResult(
-        cliente_nome="Maria Oliveira",
-        tipo_dano=TipoDano.VENTO,
-        localizacao="São Paulo, SP",
-        descricao_resumida="Telhado danificado por vendaval forte ontem à noite",
-        data_incidente=datetime(2026, 7, 6),
+        cliente_nome=str(payload["cliente_nome"]),
+        tipo_dano=TipoDano(str(payload["tipo_dano"])),
+        localizacao=str(payload["localizacao"]),
+        descricao_resumida=str(payload["descricao_resumida"]),
+        data_incidente=_parse_incident_date(payload.get("data_incidente")),
+    )
+
+
+def _build_tool_from_payload(payload: dict[str, Any]) -> ToolDecision:
+    return ToolDecision(
+        requires_tool_call=bool(payload["requires_tool_call"]),
+        tool_name=payload["tool_name"],  # type: ignore[arg-type]
+        tool_arguments=dict(payload.get("tool_arguments") or {}),
+        reasoning=str(payload["tool_reasoning"]),
+    )
+
+
+def _build_risk_from_payload(payload: dict[str, Any]) -> RiskAssessmentResult:
+    return RiskAssessmentResult(
+        fraud_risk_score=float(payload["fraud_risk_score"]),
+        severity_score=float(payload["severity_score"]),
+        justificativa_risco=str(payload["justificativa_risco"]),
+        requires_human_review=bool(payload["requires_human_review"]),
+    )
+
+
+def _build_storm_triage() -> TriageResult:
+    return _build_triage_from_payload(
+        get_mock_scenario_payload(MockScenario.STORM_CLAIM, get_request_language())
     )
 
 
 def _build_fraud_triage() -> TriageResult:
-    return TriageResult(
-        cliente_nome="Carlos Silva",
-        tipo_dano=TipoDano.FOGO,
-        localizacao="Rio de Janeiro, RJ",
-        descricao_resumida="Cozinha pegou fogo ontem",
-        data_incidente=datetime(2026, 7, 6),
+    return _build_triage_from_payload(
+        get_mock_scenario_payload(MockScenario.FRAUD_CLAIM, get_request_language())
     )
 
 
 def _build_ambiguous_triage() -> TriageResult:
-    return TriageResult(
-        cliente_nome="João Santos",
-        tipo_dano=TipoDano.OUTRO,
-        localizacao="Belo Horizonte, MG",
-        descricao_resumida="Dano na propriedade, preciso de ajuda",
-        data_incidente=None,
+    return _build_triage_from_payload(
+        get_mock_scenario_payload(MockScenario.AMBIGUOUS, get_request_language())
     )
 
 
 def _build_storm_tool_decision() -> ToolDecision:
-    return ToolDecision(
-        requires_tool_call=True,
-        tool_name="get_weather_history",
-        tool_arguments={"location": "São Paulo, SP", "date": "2026-07-06"},
-        reasoning=(
-            "MockLLM: relato menciona vendaval/tempestade — "
-            "verificação climática obrigatória para validar o sinistro."
-        ),
+    return _build_tool_from_payload(
+        get_mock_scenario_payload(MockScenario.STORM_CLAIM, get_request_language())
     )
 
 
 def _build_fraud_tool_decision() -> ToolDecision:
-    return ToolDecision(
-        requires_tool_call=False,
-        tool_name="none",
-        tool_arguments={},
-        reasoning=(
-            "MockLLM: incêndio doméstico sem menção a eventos climáticos — "
-            "verificação meteorológica não necessária."
-        ),
+    return _build_tool_from_payload(
+        get_mock_scenario_payload(MockScenario.FRAUD_CLAIM, get_request_language())
     )
 
 
 def _build_ambiguous_tool_decision() -> ToolDecision:
-    return ToolDecision(
-        requires_tool_call=False,
-        tool_name="none",
-        tool_arguments={},
-        reasoning=(
-            "MockLLM: relato vago sem localização, data ou evento climático — "
-            "nenhuma ferramenta externa aplicável."
-        ),
+    return _build_tool_from_payload(
+        get_mock_scenario_payload(MockScenario.AMBIGUOUS, get_request_language())
     )
 
 
 def _build_storm_risk() -> RiskAssessmentResult:
-    return RiskAssessmentResult(
-        fraud_risk_score=0.15,
-        severity_score=0.45,
-        justificativa_risco=(
-            "MockLLM: sinistro por vendaval coerente com verificação climática "
-            "(chuva forte e ventos intensos confirmados). Análise visual consistente "
-            "com dano por vento (consistency_score=0.9). Baixo risco de fraude."
-        ),
-        requires_human_review=False,
+    return _build_risk_from_payload(
+        get_mock_scenario_payload(MockScenario.STORM_CLAIM, get_request_language())
     )
 
 
 def _build_fraud_risk() -> RiskAssessmentResult:
-    return RiskAssessmentResult(
-        fraud_risk_score=0.88,
-        severity_score=0.70,
-        justificativa_risco=(
-            "MockLLM: relato de incêndio contradiz análise visual (vazamento de água, "
-            "consistency_score=0.1). Condições climáticas ensolaradas sem vento reforçam "
-            "inconsistência. Alta probabilidade de fraude — escalação para revisão humana."
-        ),
-        requires_human_review=True,
+    return _build_risk_from_payload(
+        get_mock_scenario_payload(MockScenario.FRAUD_CLAIM, get_request_language())
     )
 
 
 def _build_ambiguous_risk() -> RiskAssessmentResult:
-    return RiskAssessmentResult(
-        fraud_risk_score=0.65,
-        severity_score=0.50,
-        justificativa_risco=(
-            "MockLLM: relato insuficiente para conclusão automática. "
-            "Análise visual inconclusiva (consistency_score=0.5). "
-            "Condições climáticas moderadas. Revisão humana necessária."
-        ),
-        requires_human_review=True,
+    return _build_risk_from_payload(
+        get_mock_scenario_payload(MockScenario.AMBIGUOUS, get_request_language())
     )
 
 

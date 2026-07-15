@@ -37,7 +37,7 @@ class TriageResult(BaseModel):
         ...,
         min_length=1,
         max_length=2000,
-        description="Concise summary of the incident in Portuguese.",
+        description="Concise summary of the incident in the selected UI language.",
     )
     data_incidente: datetime | None = Field(
         default=None,

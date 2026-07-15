@@ -40,6 +40,7 @@ class CheckpointManager:
         checkpoint_url = settings.langgraph_checkpoint_url
 
         if checkpoint_url:
+            logger.info("Checkpoint backend: PostgreSQL")
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
             self._context = AsyncPostgresSaver.from_conn_string(checkpoint_url)
@@ -50,6 +51,7 @@ class CheckpointManager:
                 extra={"backend": "postgres"},
             )
         else:
+            logger.info("Checkpoint backend: InMemory (no DATABASE_URL)")
             self._checkpointer = InMemorySaver()
             logger.info(
                 "LangGraph in-memory checkpoint initialised",

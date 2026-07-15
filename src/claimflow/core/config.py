@@ -16,6 +16,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     # --- Alibaba Cloud / DashScope ---
@@ -105,10 +106,9 @@ class Settings(BaseSettings):
     )
 
     # --- Database / checkpointing ---
-    # PostgreSQL is the default persistence backend. Set DATABASE_URL= (empty) to
-    # fall back to the in-memory claim store for quick local testing.
+    # Leave unset/empty for in-memory stores (demos). Set DATABASE_URL for Postgres.
     database_url: str | None = Field(
-        default="postgresql://claimflow:claimflow@localhost:5432/claimflow",
+        default=None,
         description=(
             "PostgreSQL URL for claim snapshots. When set, ClaimStore uses Postgres; "
             "when empty/None, falls back to in-memory storage."
@@ -136,6 +136,13 @@ class Settings(BaseSettings):
     )
 
     # --- Application ---
+    port: int = Field(
+        default=8000,
+        ge=1,
+        le=65535,
+        alias="CLAIMFLOW_PORT",
+        description="TCP port for the FastAPI/uvicorn server.",
+    )
     api_key: SecretStr = Field(
         default=SecretStr("cf_hk_a8f3b2c19e4d5f60718293a4b5c6d7e8"),
         description=(
