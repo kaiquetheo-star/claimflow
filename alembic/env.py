@@ -1,8 +1,14 @@
-"""Alembic environment — async PostgreSQL migrations for claimflow."""
+"""Alembic environment configuration.
+
+Note: This module reads DATABASE_URL directly from environment
+instead of using Settings to avoid requiring API keys during
+migrations (important for CI/CD environments).
+"""
 
 from __future__ import annotations
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -10,7 +16,6 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from claimflow.core.config import get_settings
 from claimflow.db.models import Base
 
 config = context.config
@@ -22,15 +27,21 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    """Resolve the async SQLAlchemy URL from Settings / Alembic config."""
-    settings = get_settings()
-    url = settings.sqlalchemy_database_url
+    """Read DATABASE_URL directly from env for migrations.
+
+    We don't load the full Settings object here because migrations
+    only need the database URL, and loading Settings would require
+    all API keys (DashScope, Alibaba Cloud) which aren't available
+    in CI environments.
+    """
+    url = os.getenv("DATABASE_URL")
     if not url:
-        msg = (
-            "DATABASE_URL is not set. Configure PostgreSQL before running migrations "
-            "(see .env.example)."
+        raise ValueError(
+            "DATABASE_URL environment variable is required for migrations"
         )
-        raise RuntimeError(msg)
+    # Normalise for SQLAlchemy asyncpg (same as Settings.sqlalchemy_database_url).
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url
 
 
