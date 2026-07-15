@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 import uvicorn
@@ -31,18 +32,25 @@ logger = get_logger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Manage application startup and shutdown lifecycle hooks."""
-    settings: Settings = app.state.settings
-    setup_logging(settings)
+async def lifespan(app: FastAPI, settings: Settings | None = None) -> AsyncIterator[None]:
+    """Manage application startup and shutdown lifecycle hooks.
+
+    Args:
+        app: FastAPI application instance.
+        settings: Optional settings override. Prefer passing this from
+            ``create_app`` so startup does not call ``get_settings()``
+            (important for tests/CI without API keys).
+    """
+    resolved = settings or getattr(app.state, "settings", None) or get_settings()
+    setup_logging(resolved)
 
     checkpoint_manager = CheckpointManager()
     database = Database()
     claim_store = ClaimStore()
 
-    await database.startup(settings)
-    await checkpoint_manager.startup(settings)
-    await claim_store.startup(settings, database)
+    await database.startup(resolved)
+    await checkpoint_manager.startup(resolved)
+    await claim_store.startup(resolved, database)
 
     app.state.checkpoint_manager = checkpoint_manager
     app.state.database = database
@@ -51,20 +59,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.checkpoint_backend = checkpoint_manager.backend
     app.state.claim_store_backend = claim_store.backend
 
-    storage = get_storage_client()
+    storage = get_storage_client(resolved)
     logger.info(
         "Application starting",
         extra={
-            "environment": settings.environment,
-            "storage_backend": settings.storage_backend,
+            "environment": resolved.environment,
+            "storage_backend": resolved.storage_backend,
             "storage_client": type(storage).__name__,
             "checkpoint_backend": checkpoint_manager.backend,
             "claim_store_backend": claim_store.backend,
-            "use_mock_llm": settings.use_mock_llm,
+            "use_mock_llm": resolved.use_mock_llm,
         },
     )
-    if settings.use_mock_llm:
-        alibaba_status = await verify_alibaba_cloud_connection(settings)
+    if resolved.use_mock_llm:
+        alibaba_status = await verify_alibaba_cloud_connection(resolved)
         qwen_status = alibaba_status["alibaba_cloud_services"]["qwen_cloud"].get("status", "")
         dashscope_line = (
             "✅ CONNECTED (health check passed)"
@@ -125,7 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=f"{resolved_settings.api_v1_str}/openapi.json",
         docs_url=f"{resolved_settings.api_v1_str}/docs",
         redoc_url=f"{resolved_settings.api_v1_str}/redoc",
-        lifespan=lifespan,
+        lifespan=partial(lifespan, settings=resolved_settings),
     )
     app.state.settings = resolved_settings
 

@@ -46,6 +46,8 @@ def client() -> TestClient:
     with (
         patch("claimflow.core.config.get_settings", return_value=test_settings),
         patch("claimflow.api.routes.health.get_settings", return_value=test_settings),
+        patch("claimflow.tools.factory.get_settings", return_value=test_settings),
+        patch("claimflow.api.main.get_settings", return_value=test_settings),
         patch(
             "claimflow.api.routes.health.verify_alibaba_cloud_connection",
             new_callable=AsyncMock,
@@ -53,12 +55,17 @@ def client() -> TestClient:
         ),
     ):
         from claimflow.api.main import create_app
+        from claimflow.tools.factory import reset_storage_client_cache
 
+        reset_storage_client_cache()
         app = create_app(settings=test_settings)
         with TestClient(app) as test_client:
             yield test_client
 
     get_settings.cache_clear()
+    from claimflow.tools.factory import reset_storage_client_cache
+
+    reset_storage_client_cache()
 
 
 def test_health_endpoint(client: TestClient) -> None:
